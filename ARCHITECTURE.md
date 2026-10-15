@@ -109,6 +109,56 @@ the bound.
   previous behavior without changing persisted data or deployed contract
   interfaces, providing a safe rollback path.
 
+## Multi-Asset Pool Accounting
+
+Multi-asset pools hold balances and shares for more than one token. Every pool
+operation is scoped to exactly one token, and accounting for one token must
+never be applied to another. The authoritative per-token balances and shares
+come from the pool contract state; the frontend only reflects them and never
+re-derives a token's balance from another token's figures.
+
+### Per-Token Isolation and Asset Validation
+
+- Balances, shares, and exchange rates are keyed by token address. A lookup for
+  a token that is not part of the pool is a hard failure, not a zero balance.
+- Every pool operation (deposit, withdraw, transfer, share conversion) carries
+  an explicit token address and validates it against the pool's registered asset
+  set before any amount is computed or signed.
+- Amounts are `bigint` minor units and are only ever combined with amounts of
+  the same token. Cross-token arithmetic is rejected rather than coerced.
+- Token addresses are normalized and compared case-insensitively so the same
+  asset cannot be treated as two distinct assets.
+
+### Authorization and Validation
+
+- Operations are only performed for the authenticated account's own positions;
+  the frontend never computes or displays another account's per-token balances.
+- Asset sets and per-token figures are validated to be well-formed (non-empty,
+  unique, positive where required). Malformed pool state is a hard failure for
+  the affected operation rather than a silent default.
+- A request that references an unregistered token, or that would mix tokens in a
+  single amount, is rejected before any signing step, with a structured error
+  identifying the pool, the token, and the operation.
+
+### Failure, Retry, and Stale Data
+
+- A dependency failure while fetching authoritative pool state is reported as a
+  dependency failure, distinct from a settled validation failure, so an
+  unreachable backend is never presented as a settled accounting error.
+- Retries are bounded and abort-aware, consistent with transaction recovery, and
+  never create a second signed transaction.
+- Stale pool state is surfaced as stale rather than silently reused; the user is
+  not asked to sign against per-token figures that cannot be confirmed.
+
+### Observability and Rollback
+
+- Cross-token accounting attempts and unregistered-token references emit
+  structured errors and metrics carrying the pool reference, token address, and
+  operation, without exposing unrelated user data.
+- Enforcement is additive: it does not change persisted data or deployed
+  contract interfaces, so it can be relaxed without a migration, providing a
+  safe rollback path.
+
 ## Transaction Recovery
 
 Every wallet-connected failure is classified into a typed failure state
@@ -136,4 +186,4 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Per-borrower exposure limits are covered by focused tests for success, authorization failure, boundary values, retries, stale data, and dependency failure paths.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Per-borrower exposure limits are covered by focused tests for success, authorization failure, boundary values, retries, stale data, and dependency failure paths. Multi-asset pool accounting is covered by focused tests for per-token isolation, unregistered-token rejection, cross-token arithmetic rejection, authorization failure, boundary values, retries, stale data, and dependency failure paths.
