@@ -109,6 +109,51 @@ the bound.
   previous behavior without changing persisted data or deployed contract
   interfaces, providing a safe rollback path.
 
+## Protocol-Wide Debt Ceiling
+
+In addition to the per-borrower exposure limit, total protocol debt is bounded
+by a single protocol-wide debt ceiling. The ceiling is an admin-settable
+parameter stored in contract storage alongside the existing per-loan limits; it
+is additive and does not alter the layout or semantics of existing storage
+slots. The authoritative total outstanding debt and the configured ceiling are
+read from contract state; the frontend only reflects them and never re-derives
+total debt from partial or cached figures.
+
+### Authorization and Validation
+
+- Only the protocol admin may set or update the debt ceiling. Non-admin callers
+  are rejected with an authorization failure before any state is written.
+- The ceiling is validated to be a positive, finite integer in `bigint` minor
+  units. An invalid or missing ceiling is a hard failure for the affected action
+  rather than silently defaulting to unlimited.
+- The ceiling is enforced at loan creation/origination: a new loan whose
+  principal would push total outstanding debt above the ceiling is rejected
+  before any signing or state mutation, with a structured error identifying the
+  projected total debt, the new principal, and the configured ceiling.
+- Boundary values are exact: a loan that brings total debt exactly to the
+  ceiling is accepted; any amount above it is rejected.
+
+### Failure, Retry, and Stale Data
+
+- A dependency failure while fetching the authoritative ceiling or total debt is
+  reported as a dependency failure, distinct from a settled ceiling violation,
+  so an unreachable backend is never presented as a settled over-ceiling error.
+- Retries are bounded and abort-aware, consistent with transaction recovery, and
+  never create a second signed transaction.
+- Stale ceiling or total-debt data is surfaced as stale rather than silently
+  reused; the borrower is not asked to sign against a ceiling that cannot be
+  confirmed.
+
+### Observability and Rollback
+
+- Ceiling violations and admin ceiling updates emit structured errors, audit
+  events, and metrics carrying the projected total debt, the new principal, and
+  the configured ceiling, without exposing unrelated user data.
+- Enforcement is additive: raising or removing the configured ceiling restores
+  the previous behavior without changing persisted data or deployed contract
+  interfaces, providing a safe rollback path. Existing entry points and API
+  consumers remain fully compatible.
+
 ## Multi-Asset Pool Accounting
 
 Multi-asset pools hold balances and shares for more than one token. Every pool
@@ -150,40 +195,6 @@ re-derives a token's balance from another token's figures.
 - Stale pool state is surfaced as stale rather than silently reused; the user is
   not asked to sign against per-token figures that cannot be confirmed.
 
-### Observability and Rollback
+### Observ
 
-- Cross-token accounting attempts and unregistered-token references emit
-  structured errors and metrics carrying the pool reference, token address, and
-  operation, without exposing unrelated user data.
-- Enforcement is additive: it does not change persisted data or deployed
-  contract interfaces, so it can be relaxed without a migration, providing a
-  safe rollback path.
-
-## Transaction Recovery
-
-Every wallet-connected failure is classified into a typed failure state
-(`rejected`, `expired`, `failed`, `unknown`) and turned into a recovery plan by
-a pure function (`planTransactionRecovery`). The plan always states whether
-resubmission is safe. **Once a signed transaction has been handed to the
-network, the plan contains no action that can create a second one** — the only
-safe actions are re-polling the same hash, inspecting the explorer, copying the
-transaction id, reloading, or contacting support. Status polling is bounded
-(`maxAttempts`, `requestTimeoutMs`, overall `timeoutMs`) and abort-aware, and it
-reports a dependency failure separately from a settled failure so an unreachable
-node is never presented as a failed transaction.
-
-See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
-
-## Observability
-
-- Structured errors are emitted for budget violations and dependency failures.
-- Metrics are recorded for route load, render, and bundle dimensions.
-- Operational diagnostics distinguish between unsupported environments and genuine regressions.
-- Transaction failures are classified before they reach the UI, and carry a
-  non-identifying support code (failure category, truncated transaction hash,
-  attempt counter) so a support ticket can be correlated without exposing user
-  data.
-
-## Testing
-
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Per-borrower exposure limits are covered by focused tests for success, authorization failure, boundary values, retries, stale data, and dependency failure paths. Multi-asset pool accounting is covered by focused tests for per-token isolation, unregistered-token rejection, cross-token arithmetic rejection, authorization failure, boundary values, retries, stale data, and dependency failure paths.
+/* … truncated 2621 chars — edit only what you need near the top … */
