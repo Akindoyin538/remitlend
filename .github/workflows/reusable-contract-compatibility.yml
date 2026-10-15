@@ -1,8 +1,12 @@
 # Issue #407 – Deployed-contract compatibility suite
 # Issue #409 – Packaged as a least-privilege reusable workflow.
+# Issue #244 – Share-price rounding policy conformance gate.
 #
 # Validates that the env-var contract IDs are well-formed, present in
 # docs/deployed-contracts.md, and that the configured RPC is reachable.
+# Additionally runs the share-price rounding policy conformance suite so
+# that any change to rounding direction, precision, or edge-case handling
+# (zero supply, first deposit, dust amounts) is caught before merge.
 # The check is read-only and requires no elevated permissions.
 name: Contract Compatibility (reusable)
 
@@ -38,3 +42,11 @@ jobs:
           LENDING_POOL_CONTRACT_ID: ${{ secrets.LENDING_POOL_CONTRACT_ID }}
           REMITTANCE_NFT_CONTRACT_ID: ${{ secrets.REMITTANCE_NFT_CONTRACT_ID }}
           MULTISIG_GOVERNANCE_CONTRACT_ID: ${{ secrets.MULTISIG_GOVERNANCE_CONTRACT_ID }}
+      - name: Run share-price rounding policy suite
+        # Issue #244: enforces the documented rounding policy (direction,
+        # precision, zero-supply / first-deposit / dust edge cases) and
+        # fails the gate on any drift. Read-only; no network access needed.
+        run: node scripts/check-share-price-rounding.mjs
+        env:
+          SHARE_PRICE_ROUNDING_POLICY: "floor"
+          SHARE_PRICE_DECIMALS: "18"

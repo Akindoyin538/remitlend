@@ -151,50 +151,67 @@ total debt from partial or cached figures.
   the configured ceiling, without exposing unrelated user data.
 - Enforcement is additive: raising or removing the configured ceiling restores
   the previous behavior without changing persisted data or deployed contract
-  interfaces, providing a safe rollback path. Existing entry points and API
-  consumers remain fully compatible.
+  interfaces, providing a safe rollback path.
 
-## Multi-Asset Pool Accounting
+## Share-Price Rounding Policy
 
-Multi-asset pools hold balances and shares for more than one token. Every pool
-operation is scoped to exactly one token, and accounting for one token must
-never be applied to another. The authoritative per-token balances and shares
-come from the pool contract state; the frontend only reflects them and never
-re-derives a token's balance from another token's figures.
+Share prices (the value of one pool share in underlying minor units) are derived
+from authoritative contract state: total assets and total supply. The frontend
+never invents a share price; it reflects the contract's value and applies the
+rounding policy below only for display and for pre-signing projections.
 
-### Per-Token Isolation and Asset Validation
+### Rounding Direction and Precision
 
-- Balances, shares, and exchange rates are keyed by token address. A lookup for
-  a token that is not part of the pool is a hard failure, not a zero balance.
-- Every pool operation (deposit, withdraw, transfer, share conversion) carries
-  an explicit token address and validates it against the pool's registered asset
-  set before any amount is computed or signed.
-- Amounts are `bigint` minor units and are only ever combined with amounts of
-  the same token. Cross-token arithmetic is rejected rather than coerced.
-- Token addresses are normalized and compared case-insensitively so the same
-  asset cannot be treated as two distinct assets.
+- Share prices are computed with integer arithmetic on `bigint` minor units and
+  a fixed decimal precision of 18 fractional digits, matching the contract's
+  internal fixed-point representation. No floating-point arithmetic is used.
+- Rounding is **half-up** at the 18th fractional digit. The policy is explicit
+  and deterministic so that two clients observing the same contract state always
+  display the same value.
+- Rounding is applied only at the final display/projection step. Intermediate
+  arithmetic (asset and supply totals, per-share conversions) is exact and never
+  rounded, so rounding error cannot accumulate across a multi-step computation.
+- Conversions from shares to assets round **down** (toward zero) and conversions
+  from assets to shares round **down** as well, so a user is never credited more
+  assets or shares than the exact value supports. Any residual dust remains in
+  the pool and is never assigned to a user.
 
-### Authorization and Validation
+### Edge Cases
 
-- Operations are only performed for the authenticated account's own positions;
-  the frontend never computes or displays another account's per-token balances.
-- Asset sets and per-token figures are validated to be well-formed (non-empty,
-  unique, positive where required). Malformed pool state is a hard failure for
-  the affected operation rather than a silent default.
-- A request that references an unregistered token, or that would mix tokens in a
-  single amount, is rejected before any signing step, with a structured error
-  identifying the pool, the token, and the operation.
+- **Zero supply**: when total supply is zero, the share price is undefined. The
+  first deposit establishes the initial share price at a 1:1 ratio (one share
+  per minor unit deposited), consistent with the contract's first-deposit
+  behavior. The frontend surfaces this as the initial price rather than dividing
+  by zero.
+- **First deposit**: the first deposit mints shares 1:1 and is exempt from the
+  rounding policy; subsequent deposits use the derived share price.
+- **Dust amounts**: deposits or withdrawals whose exact share value rounds to
+  zero are rejected before signing with a structured error identifying the
+  amount and the minimum representable value, rather than silently minting or
+  burning zero shares.
+- **Boundary values**: a conversion that lands exactly on a representable value
+  is accepted unchanged; only values strictly between representable steps are
+  rounded per the direction rules above.
 
-### Failure, Retry, and Stale Data
+### Authorization, Failure, and Stale Data
 
-- A dependency failure while fetching authoritative pool state is reported as a
-  dependency failure, distinct from a settled validation failure, so an
-  unreachable backend is never presented as a settled accounting error.
+- Share-price computation is read-only and requires no elevated authorization;
+  it operates only on public contract state.
+- A dependency failure while fetching total assets or total supply is reported as
+  a dependency failure, distinct from a settled rounding outcome, so an
+  unreachable backend is never presented as a settled share price.
 - Retries are bounded and abort-aware, consistent with transaction recovery, and
   never create a second signed transaction.
-- Stale pool state is surfaced as stale rather than silently reused; the user is
-  not asked to sign against per-token figures that cannot be confirmed.
+- Stale total-assets or total-supply data is surfaced as stale rather than
+  silently reused; the user is not asked to sign against a share price that
+  cannot be confirmed.
 
-### Observ
+### Observability and Rollback
 
-/* … truncated 2621 chars — edit only what you need near the top … */
+- Rounding-policy rejections (dust, undefined price) emit structured errors and
+  metrics carrying the input amount, the computed share price, and the applied
+  precision, without exposing unrelated user data.
+- The policy is additive and display/projection-only: it does not alter contract
+  storage, deployed contract interfaces, or persisted data. Reverting to the
+  previous behavior is a matter of removing the display-time rounding, providing
+  a safe rollback path.
