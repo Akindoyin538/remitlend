@@ -71,6 +71,44 @@ borrower is never asked to sign a request whose cost cannot be computed.
 
 See [docs/loan-cost-disclosure.md](docs/loan-cost-disclosure.md).
 
+## Per-Borrower Exposure Limits
+
+Borrower-facing exposure is bounded by an explicit per-borrower limit that is
+derived from the authoritative lending-pool state, never invented client-side.
+The limit is expressed in `bigint` minor units alongside the existing loan cost
+arithmetic, so comparisons stay exact and no floating-point rounding can widen
+the bound.
+
+### Authorization and Validation
+
+- The limit is only applied to the authenticated borrower's own exposure; the
+  frontend never evaluates or displays another borrower's limit.
+- Limits are validated to be positive, finite integers in minor units. An
+  invalid or missing limit is treated as a hard failure for the affected action
+  rather than silently defaulting to unlimited.
+- A request whose projected exposure would exceed the limit is rejected before
+  any signing step, with a structured error identifying the borrower, the
+  projected exposure, and the configured limit.
+
+### Failure, Retry, and Stale Data
+
+- A dependency failure while fetching the authoritative limit is reported as a
+  dependency failure, distinct from a settled limit violation, so an unreachable
+  backend is never presented as a borrower over their limit.
+- Retries are bounded and abort-aware, consistent with transaction recovery, and
+  never create a second signed transaction.
+- Stale limit data is surfaced as stale rather than silently reused; the
+  borrower is not asked to sign against a limit that cannot be confirmed.
+
+### Observability and Rollback
+
+- Limit violations emit structured errors and metrics carrying the borrower
+  reference, projected exposure, and configured limit, without exposing
+  unrelated user data.
+- Enforcement is additive: relaxing or removing a configured limit restores the
+  previous behavior without changing persisted data or deployed contract
+  interfaces, providing a safe rollback path.
+
 ## Transaction Recovery
 
 Every wallet-connected failure is classified into a typed failure state
@@ -98,4 +136,4 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Per-borrower exposure limits are covered by focused tests for success, authorization failure, boundary values, retries, stale data, and dependency failure paths.
