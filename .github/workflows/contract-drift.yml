@@ -6,10 +6,12 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'contracts/**'
   push:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'contracts/**'
   workflow_dispatch:
 
 permissions:
@@ -122,6 +124,48 @@ jobs:
               repo: context.repo.repo,
               body
             });
+
+  nft-metadata-integrity:
+    name: Verify NFT Metadata Integrity Commitments
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install contract dependencies
+        run: |
+          if [ -f contracts/package.json ]; then
+            cd contracts && npm ci
+          else
+            echo "No contracts/package.json found; skipping dependency install."
+          fi
+
+      - name: Verify NFT metadata integrity commitments
+        run: |
+          if [ -f scripts/check-nft-metadata-integrity.js ]; then
+            node scripts/check-nft-metadata-integrity.js \
+              --contracts=contracts \
+              --fail-on-missing-commitment \
+              --output=nft-metadata-integrity-report.json
+          else
+            echo "No NFT metadata integrity checker found; skipping."
+          fi
+
+      - name: Upload NFT metadata integrity report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nft-metadata-integrity-report
+          path: nft-metadata-integrity-report.json
+          if-no-files-found: ignore
 
   frontend-types:
     name: Generate & Validate Frontend Types
