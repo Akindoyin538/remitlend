@@ -20,6 +20,22 @@ export const up = (pgm) => {
     },
   });
 
+  // Score update reason schema validation: constrain the reason values that
+  // may be persisted for a score update so downstream contracts and API
+  // consumers can rely on a bounded, authoritative set of reasons.
+  pgm.addColumn('scores', {
+    update_reason: {
+      type: 'varchar(50)',
+      notNull: true,
+      default: 'initial',
+    },
+  });
+
+  pgm.addConstraint('scores', 'scores_update_reason_check', {
+    check:
+      "update_reason IN ('initial', 'remittance', 'loan_repayment', 'loan_default', 'manual_adjustment', 'migration')",
+  });
+
   pgm.createTable('remittance_history', {
     id: 'id',
     user_id: { type: 'varchar(255)', notNull: true },
