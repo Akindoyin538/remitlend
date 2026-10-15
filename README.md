@@ -243,3 +243,6 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 
 <!-- handsoff-issue-340 -->
 - #340: frontend: add deterministic wallet and RPC test doubles
+
+<!-- handsoff-issue-248 -->
+- #248: contracts: harden NFT recipient commitment verification
