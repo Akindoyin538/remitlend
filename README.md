@@ -221,28 +221,76 @@ For details on how to report a security vulnerability, please see our [Security 
 
 ## 🤝 Contributing
 
-We welcome contributions from developers of all skill levels! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on how to get started.
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide, including the clean-checkout workflow that CI verifies on every pull request.
 
-### Environment Variables
+### Contributor Quick Start (verified in CI)
 
-See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for a full reference of all environment variables across backend, frontend, and scripts. Each `.env.example` file also links to this document.
+The commands below are executed on a fresh runner by the
+[`contributor-setup`](.github/workflows/contributor-setup.yml) workflow. If you
+change a documented command, script name, or required environment variable,
+update this section and the workflow together — CI fails with the exact
+file/section and command that drifted.
 
-### Quick Contribution Guide
+**Supported toolchain** (matches the CI runner):
 
-1. Fork the repository.
-2. Create a feature branch (`git checkout -b feat/amazing-feature`).
-3. Make your changes and commit using [Conventional Commits](https://www.conventionalcommits.org/) (`git commit -m 'feat: add amazing feature'`).
-4. Push to your branch (`git push origin feat/amazing-feature`).
-5. Open a Pull Request.
+| Tool | Supported version |
+| --- | --- |
+| Node.js | 18.x or 20.x (LTS) |
+| npm | 9+ (bundled with Node 18/20) |
+| PostgreSQL | 15 (via Docker or local service) |
+| Rust | stable (`rustup` default) |
+| Docker Compose | v2 (`docker compose`) |
 
-## 📄 License
+**1. Install dependencies** (from a clean checkout):
 
-This project is licensed under the ISC License. See the `LICENSE` file for details.
+```bash
+cd backend && npm ci
+cd ../frontend && npm ci
+```
 
-## Handsoff notes
+**2. Configure environment** (copy the example, then fill in local-only values):
 
-<!-- handsoff-issue-340 -->
-- #340: frontend: add deterministic wallet and RPC test doubles
+```bash
+cp backend/.env.example backend/.env
+```
 
-<!-- handsoff-issue-566 -->
-- #566: backend: add CSRF defenses for cookie-authenticated mutation routes
+The backend requires at least these variables (see `backend/.env.example`):
+
+```env
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/remitlend
+PORT=3001
+NODE_ENV=development
+CORS_ALLOWED_ORIGINS=http://localhost:3000
+```
+
+**3. Apply migrations and seed** (from `backend/`):
+
+```bash
+npm run migrate:up
+npm run seed
+```
+
+**4. Run a focused test** (from `backend/`):
+
+```bash
+npm test -- --runInBand
+```
+
+### Troubleshooting
+
+- **`npm ci` fails with `EUSAGE` / lockfile mismatch** — run `npm install`
+  once to refresh `package-lock.json`, commit it, and re-run `npm ci`.
+- **`npm run migrate:up` cannot connect** — confirm PostgreSQL is running and
+  that `DATABASE_URL` in `backend/.env` points at it. With Docker, run
+  `docker compose up -d db` and wait for the `pg_isready` healthcheck.
+- **`npm run seed` reports missing tables** — migrations must run before the
+  seed; re-run `npm run migrate:up` and check for errors in the output.
+- **Node version errors (`EBADENGINE`)** — switch to Node 18 or 20 LTS
+  (`nvm use 20`) to match the CI runner.
+- **Port already in use (`EADDRINUSE`)** — stop the conflicting process or set
+  a different `PORT` in `backend/.env`.
+- **Rust/Soroban build failures** — run `rustup update stable` and
+  `rustup target add wasm32-unknown-unknown` before `cargo build`.
+
+If a documented command fails on a clean checkout, open an issue with the
+failing section heading and the exact command so the workflow can be updated.
