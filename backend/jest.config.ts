@@ -62,6 +62,40 @@ const config: Config = {
         '^(./|../)(.*)\\.js$': '$1$2',
       },
     },
+    // Hermetic full-stack journeys (issue #578) run against a local
+    // deterministic Stellar/Soroban test ledger with controlled contract
+    // deployments and wallet fixtures. Kept in its own project so the
+    // journeys can be invoked from CI without public RPC or production
+    // credentials and without polluting the default unit-test run.
+    {
+      displayName: 'hermetic-e2e',
+      preset: 'ts-jest',
+      testEnvironment: 'node',
+      testMatch: ['<rootDir>/src/tests/hermetic/**/*.e2e.ts'],
+      setupFilesAfterEnv: ['<rootDir>/src/tests/hermetic/hermetic.setup.ts'],
+      moduleFileExtensions: ['ts', 'js', 'json', 'node'],
+      transform: {
+        '^.+\\.(ts|tsx)$': [
+          'ts-jest',
+          {
+            useESM: true,
+            tsconfig: {
+              module: 'esnext',
+              moduleResolution: 'bundler',
+            },
+          },
+        ],
+      },
+      extensionsToTreatAsEsm: ['.ts'],
+      globals: {
+        'ts-jest': {
+          useESM: true,
+        },
+      },
+      moduleNameMapper: {
+        '^(./|../)(.*)\\.js$': '$1$2',
+      },
+    },
   ],
 };
 
