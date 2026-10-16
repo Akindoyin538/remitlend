@@ -1,4 +1,5 @@
 import { EventIndexer } from './eventIndexer.js';
+import { type AdaptiveSchedulerState } from './adaptiveScheduler.js';
 import logger from '../utils/logger.js';
 import { getStellarRpcUrl } from '../config/stellar.js';
 
@@ -32,6 +33,11 @@ export const startIndexer = (): void => {
   const pollIntervalMs = parseInt(process.env.INDEXER_POLL_INTERVAL_MS || '30000');
   const batchSize = parseInt(process.env.INDEXER_BATCH_SIZE || '100');
 
+  // Read INDEXER_ADAPTIVE_SCHEDULING from environment. Accepts "true" / "1"
+  // (case-insensitive). Defaults to false for backward compatibility.
+  const rawAdaptive = (process.env.INDEXER_ADAPTIVE_SCHEDULING ?? '').trim().toLowerCase();
+  const adaptiveSchedulingEnabled = rawAdaptive === 'true' || rawAdaptive === '1';
+
   if (contractIds.length === 0) {
     logger
       .withContext()
@@ -48,18 +54,28 @@ export const startIndexer = (): void => {
     contractConfigs: contractIds.map((contractId) => ({ contractId })),
     pollIntervalMs,
     batchSize,
+    adaptiveSchedulingEnabled,
   });
 
-  indexerInstance.start().catch((error) => {
-    logger.withContext().error('Failed to start indexer', { error });
-    indexerInstance = null;
-  });
+  indexerInstance
+    .start()
+    .then(() => {
+      // Initialize the adaptive scheduler (if enabled) after the indexer has
+      // performed its first successful poll so that the scheduler can observe
+      // real chain activity from the very first interval adjustment.
+      indexerInstance?.getAdaptiveScheduler()?.initialize();
+    })
+    .catch((error) => {
+      logger.withContext().error('Failed to start indexer', { error });
+      indexerInstance = null;
+    });
 
   logger.withContext().info('Event indexer initialized', {
     rpcUrl,
     contractIds,
     pollIntervalMs,
     batchSize,
+    adaptiveSchedulingEnabled,
   });
 };
 
@@ -79,4 +95,14 @@ export const stopIndexer = async (): Promise<void> => {
  */
 export const getIndexer = (): EventIndexer | null => {
   return indexerInstance;
+};
+
+/**
+ * Return adaptive scheduler diagnostics, or `null` when adaptive scheduling
+ * is disabled or the indexer has not been started yet.
+ */
+export const getAdaptiveSchedulerState = async (): Promise<AdaptiveSchedulerState | null> => {
+  const scheduler = indexerInstance?.getAdaptiveScheduler();
+  if (!scheduler) return null;
+  return scheduler.getState();
 };
