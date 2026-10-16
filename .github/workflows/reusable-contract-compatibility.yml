@@ -1,13 +1,38 @@
 # Issue #407 – Deployed-contract compatibility suite
 # Issue #409 – Packaged as a least-privilege reusable workflow.
+# Issue #571 – Progressive rollout gates based on synthetic financial journeys.
 #
 # Validates that the env-var contract IDs are well-formed, present in
 # docs/deployed-contracts.md, and that the configured RPC is reachable.
 # The check is read-only and requires no elevated permissions.
+#
+# When invoked with a `stage` input the workflow also acts as a promotion
+# gate for staged rollouts: it runs synthetic read/preview/transaction-status
+# journeys against the candidate environment and blocks promotion on
+# contract/API incompatibility or a critical user-journey regression.
 name: Contract Compatibility (reusable)
 
 on:
   workflow_call:
+    inputs:
+      stage:
+        description: >-
+          Rollout stage to gate. "canary" runs the synthetic journeys against
+          the isolated staging environment; "promote" re-validates before
+          promotion. Leave empty for the plain compatibility suite.
+        required: false
+        type: string
+        default: ""
+      canary_traffic_percent:
+        description: Bounded share of traffic routed to the canary (1-50).
+        required: false
+        type: number
+        default: 10
+      base_url:
+        description: Base URL of the candidate (staging/canary) environment.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -38,3 +63,85 @@ jobs:
           LENDING_POOL_CONTRACT_ID: ${{ secrets.LENDING_POOL_CONTRACT_ID }}
           REMITTANCE_NFT_CONTRACT_ID: ${{ secrets.REMITTANCE_NFT_CONTRACT_ID }}
           MULTISIG_GOVERNANCE_CONTRACT_ID: ${{ secrets.MULTISIG_GOVERNANCE_CONTRACT_ID }}
+
+  # Issue #571 – Canary stage. Runs the synthetic financial journeys against
+  # the isolated staging environment before any production traffic is shifted.
+  canary-gate:
+    name: Canary gate (synthetic journeys)
+    if: ${{ inputs.stage == 'canary' }}
+    needs: contract-compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Validate canary traffic bound
+        run: |
+          pct="${{ inputs.canary_traffic_percent }}"
+          if ! [[ "$pct" =~ ^[0-9]+$ ]] || [ "$pct" -lt 1 ] || [ "$pct" -gt 50 ]; then
+            echo "::error::canary_traffic_percent must be an integer between 1 and 50 (got '$pct')"
+            exit 1
+          fi
+          echo "Canary will receive a bounded ${pct}% of traffic."
+      - name: Run synthetic financial journeys
+        # Read, preview, and transaction-status flows only. Journeys use
+        # synthetic identities and never touch production funds or real users.
+        run: node scripts/synthetic-journeys.mjs
+        env:
+          SYNTHETIC_BASE_URL: ${{ inputs.base_url }}
+          SYNTHETIC_STAGE: canary
+          SYNTHETIC_READ_ONLY: "true"
+          SYNTHETIC_NO_FUNDS: "true"
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+          LOAN_MANAGER_CONTRACT_ID: ${{ secrets.LOAN_MANAGER_CONTRACT_ID }}
+          LENDING_POOL_CONTRACT_ID: ${{ secrets.LENDING_POOL_CONTRACT_ID }}
+          REMITTANCE_NFT_CONTRACT_ID: ${{ secrets.REMITTANCE_NFT_CONTRACT_ID }}
+          MULTISIG_GOVERNANCE_CONTRACT_ID: ${{ secrets.MULTISIG_GOVERNANCE_CONTRACT_ID }}
+
+  # Issue #571 – Promotion gate. Blocks promotion on contract/API
+  # incompatibility or a critical user-journey regression.
+  promotion-gate:
+    name: Promotion gate
+    if: ${{ inputs.stage == 'promote' }}
+    needs: contract-compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Re-run synthetic financial journeys
+        run: node scripts/synthetic-journeys.mjs
+        env:
+          SYNTHETIC_BASE_URL: ${{ inputs.base_url }}
+          SYNTHETIC_STAGE: promote
+          SYNTHETIC_READ_ONLY: "true"
+          SYNTHETIC_NO_FUNDS: "true"
+          STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+          STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+          LOAN_MANAGER_CONTRACT_ID: ${{ secrets.LOAN_MANAGER_CONTRACT_ID }}
+          LENDING_POOL_CONTRACT_ID: ${{ secrets.LENDING_POOL_CONTRACT_ID }}
+          REMITTANCE_NFT_CONTRACT_ID: ${{ secrets.REMITTANCE_NFT_CONTRACT_ID }}
+          MULTISIG_GOVERNANCE_CONTRACT_ID: ${{ secrets.MULTISIG_GOVERNANCE_CONTRACT_ID }}
+      - name: Record deployment evidence
+        # Evidence records commit, image digest, configuration version, and
+        # gate results. Rollback preserves DB forward-compatibility and never
+        # resubmits pending chain transactions (handled by the release job).
+        run: |
+          {
+            echo "commit=${{ github.sha }}"
+            echo "image_digest=${{ inputs.image_digest }}"
+            echo "config_version=${{ inputs.config_version }}"
+            echo "contract_compatibility=passed"
+            echo "synthetic_journeys=passed"
+            echo "stage=${{ inputs.stage }}"
+          } | tee deployment-evidence.txt
+      - name: Upload deployment evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-evidence
+          path: deployment-evidence.txt
