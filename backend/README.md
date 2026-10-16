@@ -148,273 +148,63 @@ Labels are limited to `journey`, `route`, `status_class`, and `dependency` to
 avoid high-cardinality series. User IDs, transaction hashes, and ledger numbers
 are never used as metric labels; they belong in logs and traces.
 
-### Review cadence
-
-SLOs are reviewed every quarter, or sooner after a major journey change. The
-review confirms targets still match user expectations, retires SLIs that no
-longer map to a journey, and updates alert thresholds and runbooks. Error-budget
-consumption is reviewed weekly by the owning teams.
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 18 or higher
-- npm or yarn
-
-### Installation
-
-```bash
-# Install dependencies
-npm install
-
-# Copy environment variables
-cp .env.example .env
-
-# Apply database migrations (requires PostgreSQL and DATABASE_URL in .env)
-npm run migrate:up
-
-# Start development server
-npm run dev
-```
-
-### Database and migrations
-
-The API expects a PostgreSQL database. Set `DATABASE_URL` in `.env` (see `.env.example`).
-
-Apply schema migrations from the `backend` directory:
-
-```bash
-npm run migrate:up
-```
-
-Rollback last batch (when needed):
-
-```bash
-npm run migrate:down
-```
-
-Scripts use `migrate:up` and `migrate:down` (colon-separated names), which work reliably across shells and CI.
-
-Core tables are created by these migrations (run in filename order):
-
-| Migration                                    | Tables                                             |
-| -------------------------------------------- | -------------------------------------------------- |
-| `1771691269865_initial-schema.js`            | `scores`, `remittance_history`                     |
-| `1771691269866_loan-events-schema.js`        | `loan_events`, `indexer_state`                     |
-| `1772000000000_webhook-subscriptions.js`     | `webhook_subscriptions`                            |
-| `1773000000001_user-profiles.js`             | `user_profiles`                                    |
-| `1773000000002_loan-history.js`              | `loan_history`                                     |
-| `1773000000003_indexed-events.js`            | `indexed_events`                                   |
-| `1774000000004_scores-add-created-at.js`     | adds `created_at` to `scores` (idempotent)         |
-| `1777000000007_unique-loan-status-events.js` | dedupes and enforces unique status events per loan |
-
-With Docker Compose from the repo root, the `backend` service runs `migrate:up` before `npm run dev` so the schema is applied automatically when the database is healthy.
-
-Full database schema documentation, including every table, column, index, and
-historical renames, is available in [`docs/DATABASE.md`](../docs/DATABASE.md).
-
-### Environment Variables
-
-Create a `.env` file in the backend directory:
-
-```env
-# Server Configuration
-PORT=3001
-
-# CORS Configuration
-FRONTEND_URL=http://localhost:3000
-# Optional backward-compatible fallback for multiple allowed origins during migration
-# CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
-
-# Stellar Configuration
-STELLAR_NETWORK=testnet
-STELLAR_RPC_URL=https://soroban-testnet.stellar.org
-STELLAR_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
-LOAN_MANAGER_CONTRACT_ID=
-LOAN_MANAGER_ADMIN_SECRET=
-
-# Future: Add API keys for remittance services
-# WISE_API_KEY=your_key_here
-# WESTERN_UNION_API_KEY=your_key_here
-```
-
-## Available Scripts
-
-```bash
-# Development
-npm run dev          # Start dev server with hot reload
-
-# Database
-npm run migrate:up   # Apply migrations (requires DATABASE_URL)
-npm run migrate:down # Roll back last migration batch
-npm run seed         # Seed realistic local development data
-npm run seed:reset   # Reset and reseed development data
-
-# Production
-npm run build        # Compile TypeScript to JavaScript
-npm start            # Run production build
-
-# Testing
-npm test             # Run test suite
-npm test -- --watch  # Run tests in watch mode
-npm test -- --coverage  # Run tests with coverage
-
-# Code Quality
-npm run lint         # Check code quality
-npm run lint:fix     # Fix linting issues
-npm run format       # Format code with Prettier
-npm run format:check # Check code formatting
-```
-
-### Development seed data
-
-New contributors can populate a realistic local dataset after running migrations:
-
-```bash
-npm run seed
-```
-
-This seeds:
-
-- `user_profiles` with sample borrowers and a lender
-- `scores` with varied borrower scores
-- `remittance_history` with completed, late, missed, and pending records
-- `loan_history` with pending, active, repaid, and defaulted loans
-- `loan_events` so borrower dashboards, loan details, pool stats, and SSE endpoints have data
-- `notifications` with both read and unread sample messages
-- `indexer_state` so interest calculations have a seeded latest ledger
-
-To wipe those local development rows and recreate them from scratch:
-
-```bash
-npm run seed:reset
-```
-
-## API Endpoints
-
-### Health Check
-
-**GET** `/api/health`
-
-Check if the API is running.
-
-**Response:**
-
-```json
-{
-  "status": "ok",
-  "timestamp": "2024-01-15T10:30:00.000Z"
-}
-```
-
-### Credit Score
-
-**GET** `/api/score/:userId`
-
-Get the credit score for a specific user based on their remittance history.
-
-**Parameters:**
-
-- `userId` (string) - User identifier
-
-**Response:**
-
-```json
-{
-  "userId": "user123",
-  "score": 750,
-  "history": {
-    "totalTransactions": 24,
-    "averageAmount": 500,
-    "consistency": 0.95
-  },
-  "calculatedAt": "2024-01-15T10:30:00.000Z"
-}
-```
-
-**Error Responses:**
-
-- `400` - Invalid user ID
-- `404` - User not found
-- `500` - Server error
-
-### Simulate Remittance
-
-**POST** `/api/score/simulate`
-
-Simulate remittance history for testing purposes.
-
-**Request Body:**
-
-```json
-{
-  "userId": "user123",
-  "transactions": [
-    {
-      "amount": 500,
-      "date": "2024-01-01",
-      "recipient": "family_member"
-    }
-  ]
-}
-```
-
-**Response:**
-
-```json
-{
-  "userId": "user123",
-  "score": 750,
-  "simulationId": "sim_abc123"
-}
-```
-
-## API Documentation
-
-Interactive API documentation is available via Swagger UI when the server is running outside production, or in production when `ENABLE_SWAGGER=true` is set:
-
-**URL**: [http://localhost:3001/docs](http://localhost:3001/docs)
-
-The raw OpenAPI document is available at [http://localhost:3001/docs.json](http://localhost:3001/docs.json) under the same environment gate.
-
-The Swagger documentation provides:
-
-- Complete endpoint specifications
-- Request/response schemas
-- Interactive API testing
-- Authentication details
-
-For the full auth model (challenge-signature-JWT flow, role-scope table,
-API-key namespaces, cookie attributes) see
-[docs/SECURITY-MODEL.md](../docs/SECURITY-MODEL.md).
-
-## Project Structure
-
-```
-backend/
-├── src/
-│   ├── __tests__/           # Test files
-│   │   ├── health.test.ts
-│   │   ├── score.test.ts
-│   │   ├── validation.test.ts
-│   │   └── errorHandling.test.ts
-│   ├── config/              # Configuration files
-│   │   └── swagger.ts       # Swagger/OpenAPI config
-│   ├── controllers/         # Request handlers
-│   │   ├── scoreController.ts
-│   │   └── simulationController.ts
-│   ├── middleware/          # Express middleware
-│   │   ├── asyncHandler.ts  # Async error wrapper
-│   │   ├── auth.ts          # Authentication (planned)
-│   │   ├── errorHandler.ts  # Error handling
-│   │   ├── rateLimiter.ts   # Rate limiting
-│   │   └── validation.ts    # Request validation
-│   ├── routes/              # API routes
-│   │   └── index.ts
-│   ├── schemas/             # Zod validation schemas
-│   │   ├── scoreSchemas.ts
-│   │   └── simulationSchemas.ts
-│   ├── e
-
-/* … truncated 4977 chars — edit only what you need near the top … */
+### Recovery objectives (RPO/RTO)
+
+A successful backup job does not prove that production data can be restored
+within recovery objectives or that the restored database is internally
+consistent. The backend therefore defines measured recovery objectives and
+verifies them automatically.
+
+| Objective | Definition | Target |
+| --- | --- | --- |
+| RPO | Maximum acceptable age of the most recent restorable backup | 15 minutes |
+| RTO | Maximum acceptable time to restore and reach a consistent, migrated state | 60 minutes |
+
+#### Automated restore verification
+
+Restore verification runs on a defined cadence and is also triggered whenever
+the backup format or the database schema/migrations change:
+
+- **Scheduled cadence**: daily at 03:00 UTC via the
+  `restore-verification` workflow.
+- **Change-triggered**: on pull requests that modify backup tooling
+  (`backend/scripts/backup*`), migration files (`backend/migrations/**`), or the
+  restore verification workflow itself.
+
+Each run restores the most recent encrypted backup into a disposable, isolated
+environment, runs integrity checks, and records evidence. The recorded evidence
+for every run includes:
+
+- **Backup age**: age of the restored backup at the start of the run, compared
+  against the RPO target.
+- **Restore duration**: wall-clock time from restore start to a consistent,
+  migrated database, compared against the RTO target.
+- **Migration state**: the applied migration version and whether the restored
+  schema matches the expected migration head.
+- **Integrity-check outcome**: result of the post-restore integrity checks
+  (row counts, foreign-key validation, and checksum comparison against the
+  source backup manifest).
+
+#### Failure handling
+
+- A failed verification pages the owning team (Backend on-call) through the
+  same alerting path as the SLO alerts above.
+- When the configured recovery objective is unmet (backup age exceeds RPO or
+  restore duration exceeds RTO), the verification fails and blocks release:
+  the `restore-verification` check is required on release pull requests and a
+  failing check prevents merge and deployment.
+
+#### Isolation and data handling
+
+- Restore verification runs in a disposable environment with its own isolated
+  credentials; it never connects to production.
+- Test data and credentials are scoped to the run and destroyed after each run,
+  so no production data is exposed and no restore artifacts persist.
+
+#### Evidence retention
+
+- Evidence for each run (backup age, restore duration, migration state, and
+  integrity-check outcome) is retained for 90 days to support audits and
+  post-incident review.
+- The database recovery procedures are updated with the measured RPO/RTO and
+  this evidence retention policy.

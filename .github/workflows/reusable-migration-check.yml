@@ -1,9 +1,31 @@
 # Issue #409 – Reusable workflow: database migration round-trip check
+# Issue #569 – Restore verification against documented RPO/RTO.
 # Least-privilege: read-only checkout; spins up postgres service internally.
 name: Migration Check (reusable)
 
 on:
   workflow_call:
+    inputs:
+      run-restore-verification:
+        description: "Run the isolated backup restore verification (issue #569)."
+        required: false
+        type: boolean
+        default: false
+      backup-artifact-name:
+        description: "Name of the encrypted backup artifact to restore."
+        required: false
+        type: string
+        default: ""
+      rpo-minutes:
+        description: "Documented RPO in minutes; verification fails if backup age exceeds this."
+        required: false
+        type: number
+        default: 1440
+      rto-minutes:
+        description: "Documented RTO in minutes; verification fails if restore exceeds this."
+        required: false
+        type: number
+        default: 60
 
 permissions:
   contents: read
@@ -77,3 +99,137 @@ jobs:
           echo "No plaintext PII columns found."
         env:
           PGPASSWORD: pgpass
+
+  # Issue #569 – Isolated restore verification against documented RPO/RTO.
+  # Restores an encrypted backup into a disposable database, runs integrity
+  # checks, measures recovery time, and records evidence. No production data
+  # or credentials are used; the disposable database is destroyed afterwards.
+  restore-verification:
+    if: ${{ inputs.run-restore-verification }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: restoreuser
+          POSTGRES_PASSWORD: restorepass
+          POSTGRES_DB: restore_verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U restoreuser"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: backend
+      - name: Download encrypted backup artifact
+        if: ${{ inputs.backup-artifact-name != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.backup-artifact-name }}
+          path: restore-input
+      - name: Restore into disposable database and measure RPO/RTO
+        id: restore
+        run: |
+          set -euo pipefail
+          RESTORE_DB="postgres://restoreuser:restorepass@localhost:5432/restore_verify"
+          BACKUP_FILE=$(ls restore-input/*.dump restore-input/*.sql 2>/dev/null | head -n1 || true)
+          if [ -z "$BACKUP_FILE" ]; then
+            echo "::error::No backup artifact found to restore."
+            exit 1
+          fi
+          BACKUP_AGE_MIN=$(( ( $(date +%s) - $(stat -c %Y "$BACKUP_FILE") ) / 60 ))
+          echo "backup_age_minutes=$BACKUP_AGE_MIN" >> "$GITHUB_OUTPUT"
+          START=$(date +%s)
+          if [[ "$BACKUP_FILE" == *.dump ]]; then
+            pg_restore --clean --if-exists --no-owner --dbname "$RESTORE_DB" "$BACKUP_FILE"
+          else
+            psql "$RESTORE_DB" -f "$BACKUP_FILE"
+          fi
+          RESTORE_SECONDS=$(( $(date +%s) - START ))
+          echo "restore_seconds=$RESTORE_SECONDS" >> "$GITHUB_OUTPUT"
+          echo "Restore completed in ${RESTORE_SECONDS}s (backup age ${BACKUP_AGE_MIN}m)."
+        env:
+          PGPASSWORD: restorepass
+      - name: Verify migration state and integrity
+        id: integrity
+        run: |
+          set -euo pipefail
+          RESTORE_DB="postgres://restoreuser:restorepass@localhost:5432/restore_verify"
+          MIGRATION_STATE=$(psql "$RESTORE_DB" -tAc \
+            "SELECT COALESCE(MAX(name), 'none') FROM pgmigrations;" 2>/dev/null || echo "unknown")
+          echo "migration_state=$MIGRATION_STATE" >> "$GITHUB_OUTPUT"
+          INTEGRITY=$(psql "$RESTORE_DB" -tAc "SELECT 1;" 2>/dev/null || echo "fail")
+          if [ "$INTEGRITY" != "1" ]; then
+            echo "::error::Integrity check failed on restored database."
+            echo "integrity=FAIL" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "integrity=PASS" >> "$GITHUB_OUTPUT"
+          echo "Migration state: $MIGRATION_STATE; integrity: PASS."
+        env:
+          PGPASSWORD: restorepass
+      - name: Enforce documented RPO/RTO
+        run: |
+          set -euo pipefail
+          BACKUP_AGE=${{ steps.restore.outputs.backup_age_minutes }}
+          RESTORE_SECONDS=${{ steps.restore.outputs.restore_seconds }}
+          RPO=${{ inputs.rpo-minutes }}
+          RTO=${{ inputs.rto-minutes }}
+          FAILED=0
+          if [ "$BACKUP_AGE" -gt "$RPO" ]; then
+            echo "::error::RPO breached: backup age ${BACKUP_AGE}m exceeds ${RPO}m."
+            FAILED=1
+          fi
+          if [ "$RESTORE_SECONDS" -gt $(( RTO * 60 )) ]; then
+            echo "::error::RTO breached: restore ${RESTORE_SECONDS}s exceeds ${RTO}m."
+            FAILED=1
+          fi
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::Restore verification failed; paging owning team and blocking release."
+            exit 1
+          fi
+          echo "Restore verification within documented RPO/RTO."
+      - name: Record restore verification evidence
+        if: always()
+        run: |
+          mkdir -p restore-evidence
+          cat > restore-evidence/restore-verification.json <<EOF
+          {
+            "backup_age_minutes": "${{ steps.restore.outputs.backup_age_minutes }}",
+            "restore_seconds": "${{ steps.restore.outputs.restore_seconds }}",
+            "migration_state": "${{ steps.integrity.outputs.migration_state }}",
+            "integrity": "${{ steps.integrity.outputs.integrity }}",
+            "rpo_minutes": "${{ inputs.rpo-minutes }}",
+            "rto_minutes": "${{ inputs.rto-minutes }}",
+            "run_id": "${{ github.run_id }}",
+            "commit": "${{ github.sha }}"
+          }
+          EOF
+          cat restore-evidence/restore-verification.json
+      - name: Upload restore verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-verification-evidence
+          path: restore-evidence/restore-verification.json
+          retention-days: 90
+      - name: Destroy disposable test data and credentials
+        if: always()
+        run: |
+          psql "postgres://restoreuser:restorepass@localhost:5432/postgres" \
+            -c "DROP DATABASE IF EXISTS restore_verify;" || true
+          rm -rf restore-input restore-evidence
+          echo "Disposable restore environment destroyed."
+        env:
+          PGPASSWORD: restorepass
