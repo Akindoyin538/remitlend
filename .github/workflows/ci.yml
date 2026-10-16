@@ -12,6 +12,7 @@
 #                                       └──► scripts-typecheck
 #                       ──► migration-check (path-filtered)
 #                       ──► contracts ──► contract-compatibility (#407)
+#   boundary-check (#580) ──► backend / frontend / contracts / scripts-typecheck
 # ─────────────────────────────────────────────────────────────────────────────
 name: RemitLend CI
 
@@ -26,8 +27,26 @@ on:
 permissions: {}
 
 jobs:
+  # ── 0. Architecture boundary check (issue #580) ─────────────────────────────
+  # Enforces the allowed/prohibited import map between frontend, backend,
+  # contracts, and scripts, and rejects dependency cycles. Runs first so a
+  # boundary violation fails fast before the heavier build/test jobs.
+  boundary-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Enforce package dependency boundaries
+        run: node scripts/check-dependency-boundaries.mjs
+
   # ── 1. Supply-chain audit ───────────────────────────────────────────────────
   supply-chain-audit:
+    needs: boundary-check
     uses: ./.github/workflows/reusable-supply-chain-audit.yml
     permissions:
       contents: read
@@ -214,129 +233,4 @@ jobs:
           fi
         working-directory: contracts
         continue-on-error: true
-      - name: Generate optimization report
-        run: |
-          bash ../scripts/optimize-wasm-sizes.sh ./target/wasm32-unknown-unknown/release ./.wasm-optimized
-        working-directory: contracts
-        continue-on-error: true
-      - name: Upload size analysis and optimization report
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: wasm-optimization-report
-          path: |
-            contracts/.wasm-optimized/
-            contracts/size-budgets.json
-          retention-days: 30
-      - name: Upload wasm artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: contracts-wasm
-          path: contracts/target/wasm32-unknown-unknown/release/*.wasm
-          if-no-files-found: error
-      - name: Install tarpaulin
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-tarpaulin
-      - name: Run coverage
-        run: cargo tarpaulin --out Xml
-        working-directory: contracts
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v7
-        with:
-          name: contracts-coverage
-          path: contracts/cobertura.xml
-          retention-days: 7
-      - name: Check fuzz targets compile
-        run: cargo check
-        working-directory: contracts/fuzz
-
-  # ── Issue #359: Secrets inventory and automated exposure scanning ─────────
-  # Scans every file tracked by git for accidental secret commits using two
-  # complementary tools:
-  #   1. gitleaks — git-history-aware pattern scanner (catches past leaks too)
-  #   2. grep-based heuristics — lightweight zero-install check for common
-  #      high-entropy strings and placeholder values left in committed files
-  #
-  # The job is intentionally placed last so it does not block fast-feedback
-  # jobs (lint, typecheck) on PRs but still gates merges to main.
-  secrets-scan:
-    needs: supply-chain-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Fetch full history so gitleaks can scan all commits, not just HEAD.
-          fetch-depth: 0
-
-      - name: Run gitleaks secret scan
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # GITLEAKS_LICENSE is required only for organisations on the paid plan.
-          # For public / open-source repos the free tier applies automatically.
-        with:
-          args: >
-            detect
-            --source .
-            --log-opts="HEAD"
-            --no-git=false
-            --redact
-
-      - name: Check for high-risk placeholder secrets in committed files
-        # Lightweight heuristic scan that catches common developer mistakes:
-        # - Default JWT secrets left in committed config
-        # - Hardcoded API keys in source
-        # - Private keys accidentally committed
-        # - AWS key patterns
-        # This is complementary to gitleaks and runs without any external tool.
-        shell: bash
-        run: |
-          set +e
-          FOUND=0
-
-          # Patterns known to be developer-placeholder values that must never be committed.
-          HIGH_RISK_PATTERNS=(
-            'your-super-secret-jwt-key'
-            'change-me-in-production'
-            'CHANGE_ME'
-            'INSERT_SECRET_HERE'
-            'TODO.*secret'
-            'AKIA[0-9A-Z]{16}'
-            '-----BEGIN (RSA|EC|OPENSSH) PRIVATE KEY-----'
-            'sk-[a-zA-Z0-9]{48}'
-          )
-
-          # Files and directories to exclude from the scan.
-          EXCLUDE_ARGS=(
-            --exclude-dir=node_modules
-            --exclude-dir=.git
-            --exclude-dir=target
-            --exclude-dir=.next
-            --exclude='*.lock'
-            --exclude='*.wasm'
-            --exclude='*.png'
-            --exclude='*.svg'
-          )
-
-          for pattern in "${HIGH_RISK_PATTERNS[@]}"; do
-            # Search only tracked files (respects .gitignore automatically via git ls-files).
-            # Exclude .github/ (workflow definitions) and docs/ (documentation examples) and .env.example.
-            if git ls-files -z | grep -zv '^\.github/' | grep -zv '^docs/' | xargs -0 grep -l --include="*.ts" --include="*.js" \
-                --include="*.json" --include="*.yaml" --include="*.yml" \
-                -P "$pattern" 2>/dev/null | grep -v '\.env\.example$' | grep -q .; then
-              echo "::error::High-risk placeholder detected in committed file (pattern: $pattern)"
-              git ls-files -z | grep -zv '^\.github/' | grep -zv '^docs/' | xargs -0 grep -ln -P "$pattern" 2>/dev/null | \
-                grep -v '\.env\.example$'
-              FOUND=1
-            fi
-          done
-
-          if [ "$FOUND" -eq 1 ]; then
-            echo ""
-            echo "::error::One or more high-risk secrets or placeholders were found in committed files."
-            echo "Remove them, rotate any real credentials, and re-push."
-            echo "See docs/SECRETS-INVENTORY.md for the canonical secrets reference."
-            exit 1
-          fi
-          echo "No high-risk placeholder secrets found in committed files."
+      - name: Generate

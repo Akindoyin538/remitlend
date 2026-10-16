@@ -1,4 +1,5 @@
 # Issue #409 – Reusable workflow: money-policy drift check
+# Issue #580 – Extended with dependency-boundary enforcement (imports + cycles).
 # Least-privilege: read-only checkout, no secrets needed.
 name: Money Policy Check (reusable)
 
@@ -24,4 +25,10 @@ jobs:
         working-directory: scripts
       - name: Check generated money-policy artifacts are up to date
         run: npx ts-node gen-money.ts --check
+        working-directory: scripts
+      - name: Enforce dependency boundaries (prohibited imports)
+        run: npx ts-node check-boundaries.ts
+        working-directory: scripts
+      - name: Detect dependency cycles
+        run: npx ts-node check-boundaries.ts --cycles
         working-directory: scripts
