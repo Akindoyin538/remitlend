@@ -1,9 +1,27 @@
 # Issue #409 – Reusable workflow: database migration round-trip check
+# Issue #572 – Rehearse migrations against production-scale sanitized data and
+# record runtime, lock duration, and resource use against defined thresholds.
 # Least-privilege: read-only checkout; spins up postgres service internally.
 name: Migration Check (reusable)
 
 on:
   workflow_call:
+    inputs:
+      rehearsal_scale:
+        description: "Row-count multiplier for the sanitized rehearsal dataset"
+        required: false
+        type: number
+        default: 1
+      max_runtime_seconds:
+        description: "Fail if a migration exceeds this runtime (seconds)"
+        required: false
+        type: number
+        default: 300
+      max_lock_seconds:
+        description: "Fail if a migration holds locks longer than this (seconds)"
+        required: false
+        type: number
+        default: 30
 
 permissions:
   contents: read
@@ -41,6 +59,62 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: postgres://pguser:pgpass@localhost:5432/remitlend_test
+      - name: Seed production-scale sanitized rehearsal dataset
+        run: |
+          echo "Seeding sanitized rehearsal dataset (scale=${{ inputs.rehearsal_scale }})..."
+          npm run seed:rehearsal -- --scale "${{ inputs.rehearsal_scale }}"
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://pguser:pgpass@localhost:5432/remitlend_test
+      - name: Verify rehearsal dataset is sanitized (no direct/indirect PII)
+        run: |
+          echo "Verifying rehearsal dataset contains no direct or indirect PII..."
+          PII_COLUMNS=(
+            'recipient_email' 'recipient_phone' 'recipient_name'
+            'plaintext_email' 'plaintext_phone' 'plaintext_name'
+            'email' 'phone' 'full_name' 'national_id' 'ssn' 'passport_number'
+          )
+          FOUND=0
+          for col in "${PII_COLUMNS[@]}"; do
+            RESULT=$(psql postgres://pguser:pgpass@localhost:5432/remitlend_test -tAc \
+              "SELECT column_name FROM information_schema.columns WHERE column_name = '$col';" 2>/dev/null)
+            if [ -n "$RESULT" ]; then
+              echo "::error::Plaintext PII column found in rehearsal dataset: $col"
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" -eq 1 ]; then
+            exit 1
+          fi
+          echo "Rehearsal dataset is sanitized."
+        env:
+          PGPASSWORD: pgpass
+      - name: Rehearse migrations with concurrent reads/writes
+        run: |
+          echo "Starting concurrent read/write load during migration rehearsal..."
+          npm run rehearse:migrations -- \
+            --concurrency 4 \
+            --max-runtime-seconds "${{ inputs.max_runtime_seconds }}" \
+            --max-lock-seconds "${{ inputs.max_lock_seconds }}" \
+            --report migration-rehearsal-report.json
+        working-directory: backend
+        env:
+          DATABASE_URL: postgres://pguser:pgpass@localhost:5432/remitlend_test
+      - name: Enforce migration safety thresholds
+        run: |
+          echo "Enforcing migration safety thresholds..."
+          npm run rehearse:check -- \
+            --report migration-rehearsal-report.json \
+            --max-runtime-seconds "${{ inputs.max_runtime_seconds }}" \
+            --max-lock-seconds "${{ inputs.max_lock_seconds }}"
+        working-directory: backend
+      - name: Upload migration rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-rehearsal-evidence
+          path: backend/migration-rehearsal-report.json
+          if-no-files-found: warn
       - name: Migrate all the way down (reversibility check)
         run: |
           MIGRATION_COUNT=$(ls migrations/*.js 2>/dev/null | wc -l)
