@@ -246,3 +246,6 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 
 <!-- handsoff-issue-563 -->
 - #563: observability: add tested redaction rules for logs, traces, and error reports
+
+<!-- handsoff-issue-565 -->
+- #565: security: add risk-based abuse controls for loan and remittance submission flows
