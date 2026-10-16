@@ -22,6 +22,139 @@ The backend serves as a bridge between the frontend application and the Stellar 
 - **Documentation**: Swagger/OpenAPI
 - **Code Quality**: ESLint + Prettier
 
+## Service Level Objectives (SLOs)
+
+This section defines the service-level indicators (SLIs) and objectives for the
+critical borrower and lender journeys. Component health checks only prove that a
+service responds; these SLOs measure whether a user can actually complete a
+journey within an acceptable time. They span the frontend, API, indexer, RPC
+confirmation, and notification dependencies.
+
+### Critical journeys
+
+| Journey | User | Steps |
+| --- | --- | --- |
+| Request a loan | Borrower | Submit request in UI → API accepts → tx submitted → chain finality → indexer projects loan |
+| Repay a loan | Borrower | Submit repayment in UI → API accepts → tx submitted → chain finality → indexer projects repayment |
+| Inspect eligible funds | Lender | Open pool view → API returns eligible funds → indexer projection is current |
+| Withdraw eligible funds | Lender | Submit withdrawal in UI → API accepts → tx submitted → chain finality → indexer projects withdrawal |
+
+### SLI definitions
+
+Each SLI below has a precise event definition, an eligible denominator, and an
+exclusion policy. Latency SLIs are measured as the fraction of eligible events
+completed within the target; availability SLIs are measured as the fraction of
+eligible requests that succeed.
+
+#### 1. `api_request_latency` — API acceptance latency
+
+- **Event definition**: Time from the API receiving a journey request
+  (`POST /api/loans`, `POST /api/loans/:id/repay`, `POST /api/withdrawals`,
+  `GET /api/pools/:id/eligible-funds`) to the API returning a 2xx response.
+- **Eligible denominator**: All requests to those routes that reach the API and
+  are not rejected by authentication, authorization, or request validation.
+- **Exclusions**: 4xx client errors (auth, validation, rate limiting), requests
+  from synthetic health probes, and requests during a declared dependency
+  outage window.
+- **Target**: 99% of eligible requests < 500 ms; 99.9% < 2 s.
+
+#### 2. `tx_submission_latency` — transaction submission latency
+
+- **Event definition**: Time from the API accepting a journey request to the
+  signed transaction being accepted by Soroban RPC (`sendTransaction` returns a
+  hash without a submission error).
+- **Eligible denominator**: All journey requests that pass API validation and
+  produce a signed transaction.
+- **Exclusions**: Requests where the user abandons signing, wallet rejections,
+  and requests during a declared RPC outage window.
+- **Target**: 99% of eligible submissions < 3 s; 99.9% < 10 s.
+
+#### 3. `chain_finality_latency` — chain finality latency
+
+- **Event definition**: Time from RPC accepting the transaction to the
+  transaction reaching ledger finality (successful `getTransaction` with a
+  finalized ledger).
+- **Eligible denominator**: All submitted transactions for the critical
+  journeys.
+- **Exclusions**: Transactions that fail on-chain for business reasons
+  (insufficient balance, contract revert) and transactions during a declared
+  network halt.
+- **Target**: 99% of eligible transactions finalize < 30 s; 99.9% < 120 s.
+
+#### 4. `indexer_projection_lag` — indexer projection lag
+
+- **Event definition**: Difference between the latest finalized ledger and the
+  ledger last projected into `loan_events` / `indexed_events` by the indexer.
+- **Eligible denominator**: All polling intervals where the indexer is running
+  and the RPC is reachable.
+- **Exclusions**: Intervals during a declared RPC outage, during a planned
+  indexer restart, and while a backfill is explicitly in progress.
+- **Target**: 99% of intervals have lag < 5 ledgers; 99.9% < 20 ledgers.
+
+#### 5. `journey_success_rate` — end-to-end journey success
+
+- **Event definition**: Fraction of journey attempts that reach a terminal
+  success state (loan requested, loan repaid, eligible funds inspected,
+  withdrawal completed) within the journey deadline.
+- **Eligible denominator**: All journey attempts started from the frontend.
+- **Exclusions**: User-cancelled attempts, attempts rejected by validation, and
+  attempts during a declared dependency outage window.
+- **Target**: 99.5% success over a 28-day window.
+
+#### 6. `notification_delivery_latency` — notification delivery
+
+- **Event definition**: Time from a journey reaching a terminal state to the
+  corresponding notification being delivered to the user.
+- **Eligible denominator**: All terminal journey events that have a notification
+  subscription.
+- **Exclusions**: Users with notifications disabled and events during a declared
+  notification-provider outage.
+- **Target**: 99% of eligible notifications delivered < 60 s.
+
+### Error budgets
+
+Each SLO has a 28-day rolling error budget equal to `1 - target`. When more than
+50% of a budget is consumed, the owning team pauses non-urgent feature work on
+the affected journey and prioritizes reliability fixes. When a budget is fully
+exhausted, the journey is frozen for feature work until the budget recovers.
+
+### Alerts
+
+Alerts are tied to user impact and each has an owner, a runbook, and an
+actionable threshold. Alerts fire on the burn rate of the error budget over a
+short window (fast burn) and a long window (slow burn).
+
+| Alert | Condition | User impact | Owner | Runbook |
+| --- | --- | --- | --- | --- |
+| `ApiLatencyFastBurn` | `api_request_latency` budget burn > 14.4x over 1 h | Borrowers/lenders wait on every action | Backend on-call | `docs/runbooks/api-latency.md` |
+| `TxSubmissionFastBurn` | `tx_submission_latency` budget burn > 14.4x over 1 h | Loan requests and repayments stall before submission | Backend on-call | `docs/runbooks/tx-submission.md` |
+| `ChainFinalitySlowBurn` | `chain_finality_latency` budget burn > 6x over 6 h | Loans and withdrawals take too long to confirm | Chain on-call | `docs/runbooks/chain-finality.md` |
+| `IndexerLagHigh` | `indexer_projection_lag` > 20 ledgers for 10 min | Lenders see stale eligible funds; borrowers see stale loan state | Indexer on-call | `docs/runbooks/indexer-lag.md` |
+| `JourneySuccessLow` | `journey_success_rate` < 99% over 1 h | Users cannot complete a critical journey | Product on-call | `docs/runbooks/journey-success.md` |
+| `NotificationDeliverySlow` | `notification_delivery_latency` p99 > 5 min for 15 min | Users miss loan and repayment updates | Backend on-call | `docs/runbooks/notification-delivery.md` |
+
+### Dashboards
+
+Dashboards separate dependency outages from application failures so responders
+can tell whether the API, the indexer, the RPC, or the notification provider is
+at fault. Panels are grouped as:
+
+- **Application**: API latency and error rate, journey success rate.
+- **Dependencies**: RPC submission and finality latency, indexer projection lag,
+  notification delivery latency.
+- **Error budget**: Remaining budget per SLO over the 28-day window.
+
+Labels are limited to `journey`, `route`, `status_class`, and `dependency` to
+avoid high-cardinality series. User IDs, transaction hashes, and ledger numbers
+are never used as metric labels; they belong in logs and traces.
+
+### Review cadence
+
+SLOs are reviewed every quarter, or sooner after a major journey change. The
+review confirms targets still match user expectations, retires SLIs that no
+longer map to a journey, and updates alert thresholds and runbooks. Error-budget
+consumption is reviewed weekly by the owning teams.
+
 ## Getting Started
 
 ### Prerequisites
@@ -282,266 +415,6 @@ backend/
 │   ├── schemas/             # Zod validation schemas
 │   │   ├── scoreSchemas.ts
 │   │   └── simulationSchemas.ts
-│   ├── errors/              # Custom error classes
-│   │   └── AppError.ts
-│   ├── app.ts               # Express app setup
-│   └── index.ts             # Server entry point
-├── .env.example             # Environment template
-├── .eslintrc.cjs            # ESLint configuration
-├── .prettierrc              # Prettier configuration
-├── jest.config.js           # Jest configuration
-├── tsconfig.json            # TypeScript configuration
-├── package.json
-└── README.md
-```
+│   ├── e
 
-## Middleware
-
-### Error Handler
-
-Centralized error handling middleware that catches and formats errors.
-
-```typescript
-import { errorHandler } from './middleware/errorHandler';
-app.use(errorHandler);
-```
-
-### Validation
-
-Request validation using Zod schemas.
-
-```typescript
-import { validate } from './middleware/validation';
-import { mySchema } from './schemas/mySchemas';
-
-router.post('/endpoint', validate(mySchema), controller);
-```
-
-### Rate Limiter
-
-Protects endpoints from abuse with configurable rate limits.
-
-```typescript
-import { rateLimiter } from './middleware/rateLimiter';
-app.use('/api/', rateLimiter);
-```
-
-### Async Handler
-
-Wraps async route handlers to catch errors automatically.
-
-```typescript
-import { asyncHandler } from './middleware/asyncHandler';
-
-router.get(
-  '/endpoint',
-  asyncHandler(async (req, res) => {
-    // Async code here
-  }),
-);
-```
-
-## Testing
-
-### Running Tests
-
-```bash
-# Run all tests
-npm test
-
-# Run specific test file
-npm test -- health.test.ts
-
-# Run with coverage
-npm test -- --coverage
-
-# Watch mode
-npm test -- --watch
-```
-
-### Test Structure
-
-```typescript
-import request from 'supertest';
-import app from '../app';
-
-describe('GET /api/health', () => {
-  it('should return 200 OK', async () => {
-    const response = await request(app).get('/api/health').expect(200);
-
-    expect(response.body).toHaveProperty('status', 'ok');
-  });
-});
-```
-
-### Test Coverage
-
-Aim for >80% code coverage on new code. Current coverage:
-
-- Statements: Check with `npm test -- --coverage`
-- Branches: Check with `npm test -- --coverage`
-- Functions: Check with `npm test -- --coverage`
-- Lines: Check with `npm test -- --coverage`
-
-## Error Handling
-
-### Custom Error Class
-
-```typescript
-import { AppError } from './errors/AppError';
-
-throw new AppError('User not found', 404);
-```
-
-### Error Response Format
-
-```json
-{
-  "success": false,
-  "message": "Error message",
-  "statusCode": 400,
-  "errors": []
-}
-```
-
-## Validation Schemas
-
-Validation schemas are defined using Zod in the `schemas/` directory.
-
-### Example Schema
-
-```typescript
-import { z } from 'zod';
-
-export const getUserScoreSchema = z.object({
-  params: z.object({
-    userId: z.string().min(1, 'User ID is required'),
-  }),
-});
-
-export const simulateRemittanceSchema = z.object({
-  body: z.object({
-    userId: z.string().min(1),
-    transactions: z.array(
-      z.object({
-        amount: z.number().positive(),
-        date: z.string(),
-        recipient: z.string(),
-      }),
-    ),
-  }),
-});
-```
-
-## Future Enhancements
-
-### Phase 1: Real Remittance Integration
-
-- [ ] Wise API integration
-- [ ] Western Union API integration
-- [ ] Remittance data verification
-- [ ] Historical data import
-
-### Phase 2: Enhanced Features
-
-- [ ] User authentication (JWT)
-- [ ] Database integration (PostgreSQL)
-- [ ] IPFS integration for NFT metadata
-- [ ] Webhook support for blockchain events
-
-### Phase 3: Production Ready
-
-- [ ] Caching layer (Redis)
-- [ ] Logging and monitoring
-- [ ] CI/CD pipeline
-- [ ] Load balancing support
-- [ ] API versioning
-
-## Deployment
-
-### Docker
-
-```bash
-# Build image
-docker build -t remitlend-backend .
-
-# Run container
-docker run -p 3001:3001 --env-file .env remitlend-backend
-```
-
-### Docker Compose
-
-From the project root:
-
-```bash
-docker compose up backend
-```
-
-### Production Considerations
-
-- Set `NODE_ENV=production`
-- Use process manager (PM2, systemd)
-- Enable HTTPS
-- Configure proper CORS origins
-- Set up monitoring and logging
-- Implement health checks
-- Use environment-specific configs
-
-## Contributing
-
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines on contributing to the backend.
-
-### Code Style
-
-- Follow TypeScript best practices
-- Use async/await over callbacks
-- Maintain strict typing
-- Write descriptive variable names
-- Add JSDoc comments for public functions
-- Keep functions small and focused
-
-### Before Submitting PR
-
-```bash
-# Run all checks
-npm run lint
-npm run format:check
-npm test
-npm run build
-```
-
-## Troubleshooting
-
-### Port Already in Use
-
-```bash
-# Find and kill process on port 3001
-lsof -ti:3001 | xargs kill -9
-```
-
-### TypeScript Errors
-
-```bash
-# Clean build
-rm -rf dist/
-npm run build
-```
-
-### Module Not Found
-
-```bash
-# Reinstall dependencies
-rm -rf node_modules package-lock.json
-npm install
-```
-
-## License
-
-ISC License - See LICENSE file for details.
-
-## Support
-
-- Open an issue for bug reports
-- Check existing issues before creating new ones
-- Provide detailed reproduction steps
-- Include error messages and logs
+/* … truncated 4977 chars — edit only what you need near the top … */

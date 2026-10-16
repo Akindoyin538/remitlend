@@ -86,6 +86,98 @@ node is never presented as a failed transaction.
 
 See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
+## Service-Level Objectives
+
+Component health checks answer "is the service up?". They do not answer "can a
+borrower request or repay a loan, or can a lender inspect and withdraw eligible
+funds, within an acceptable time?". This section defines the service-level
+indicators (SLIs) and objectives (SLOs) for those critical journeys, spanning the
+frontend, API, indexer, RPC confirmation, and notification dependencies.
+
+### SLI conventions
+
+Every SLI below is defined by three things, and all three are required for the
+SLI to be valid:
+
+- **Event definition** — the precise, countable event, expressed as a ratio of
+  `good events / eligible events`.
+- **Eligible denominator** — exactly which requests or operations count toward
+  the denominator. Anything not listed is out of scope for the SLI.
+- **Exclusion policy** — the explicit, auditable reasons an event is dropped
+  from both numerator and denominator. Exclusions are applied before the ratio
+  is computed and are themselves counted, so an exclusion spike is visible
+  rather than silently improving the SLI.
+
+Latency SLIs are measured as the fraction of eligible events completing within
+the stated threshold (a "good-over-total" ratio), not as an average, so a slow
+tail cannot be hidden by fast median traffic.
+
+### Journey SLIs
+
+| Journey | SLI | Event definition (good / eligible) | Eligible denominator | Exclusion policy | Objective |
+| --- | --- | --- | --- | --- | --- |
+| Borrower — request loan | Request success | `POST /loans` returning a signed, accepted request / all `POST /loans` attempts | Authenticated borrower requests that reach the API | Client-side validation failures before submission; user-cancelled wallet prompts; duplicate submissions deduplicated by idempotency key | 99.5% over 28d |
+| Borrower — request loan | Submission latency | Requests acknowledged by the API within 2s / all eligible requests | Same as above | Same as above | 95% within 2s |
+| Borrower — repay loan | Repayment success | `POST /loans/{id}/repay` accepted / all repayment attempts | Authenticated repayments for an active loan | Client-side validation failures; user-cancelled wallet prompts; repayments for already-settled loans | 99.5% over 28d |
+| Borrower — repay loan | Submission latency | Repayments acknowledged within 2s / all eligible repayments | Same as above | Same as above | 95% within 2s |
+| Lender — inspect eligible funds | Eligibility read freshness | Eligibility reads served from a projection no more than 30s behind chain head / all eligibility reads | Authenticated lender eligibility reads | Reads served from cache younger than the projection TTL; reads for lenders with no position | 99% within 30s |
+| Lender — withdraw | Withdrawal success | `POST /withdrawals` accepted / all withdrawal attempts | Authenticated withdrawals for a lender with eligible funds | Client-side validation failures; user-cancelled wallet prompts; withdrawals for ineligible balances | 99.5% over 28d |
+| Lender — withdraw | Submission latency | Withdrawals acknowledged within 2s / all eligible withdrawals | Same as above | Same as above | 95% within 2s |
+
+### Latency stages are measured separately
+
+A single end-to-end number hides which dependency is slow. Each transaction
+journey therefore reports three distinct stages, and each has its own objective:
+
+- **Transaction submission** — from the user confirming in the wallet to the API
+  acknowledging the request. This isolates frontend and API responsiveness.
+- **Chain finality** — from submission acknowledgement to the transaction being
+  observed as final on chain. This isolates RPC and network confirmation, and is
+  reported separately from submission so a slow chain is never attributed to the
+  application.
+- **Indexer projection lag** — from chain finality to the indexer projection
+  reflecting the change. This isolates the indexer and is the stage that governs
+  eligibility-read freshness for lenders.
+
+Submission, finality, and projection lag are never summed into one SLI; a
+regression in one stage must be attributable without inspecting the others.
+
+### Alerts
+
+Every alert is tied to user impact, not to a component's internal state, and
+carries an owner, a runbook, and an actionable threshold.
+
+| Alert | User impact | Threshold | Owner | Runbook |
+| --- | --- | --- | --- | --- |
+| Borrower request/repay success below objective | Borrowers cannot request or repay loans | Burn rate > 2x over 1h | Payments on-call | `docs/runbooks/borrower-journey.md` |
+| Submission latency below objective | Borrowers wait on an unresponsive request | 95th percentile > 2s for 10m | Frontend on-call | `docs/runbooks/submission-latency.md` |
+| Chain finality below objective | Submitted transactions do not settle | 95th percentile > 60s for 15m | Chain on-call | `docs/runbooks/chain-finality.md` |
+| Indexer projection lag above objective | Lenders see stale eligible funds | Lag > 30s for 10m | Indexer on-call | `docs/runbooks/indexer-lag.md` |
+| Lender withdrawal success below objective | Lenders cannot withdraw eligible funds | Burn rate > 2x over 1h | Payments on-call | `docs/runbooks/lender-journey.md` |
+| Notification delivery failure | Users miss status changes they depend on | Failure rate > 5% for 15m | Notifications on-call | `docs/runbooks/notifications.md` |
+
+### Dashboards
+
+Dashboards separate dependency outages from application failures so an
+unreachable RPC node or indexer is never presented as an application bug:
+
+- Application panels (frontend, API) and dependency panels (RPC, indexer,
+  notifications) are distinct rows with distinct alerting.
+- Dependency failures are reported as dependency failures, consistent with the
+  transaction-recovery contract above.
+- Labels are limited to low-cardinality dimensions (journey, stage, outcome,
+  dependency). User identifiers, transaction hashes, and other unbounded values
+  are never used as metric labels; they belong in logs and support codes.
+
+### Review cadence and error-budget response
+
+- SLOs are reviewed on a monthly cadence, and after any incident that consumes
+  more than 25% of a journey's error budget.
+- When a journey's error budget is exhausted, feature work for that journey
+  pauses and reliability work takes priority until the budget recovers.
+- When burn rate exceeds 2x, the owning on-call follows the linked runbook and
+  records the outcome; recurring causes feed back into the next review.
+
 ## Observability
 
 - Structured errors are emitted for budget violations and dependency failures.
@@ -95,6 +187,9 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
   non-identifying support code (failure category, truncated transaction hash,
   attempt counter) so a support ticket can be correlated without exposing user
   data.
+- Journey SLIs are recorded per stage (submission, finality, projection lag) with
+  low-cardinality labels, and dependency failures are recorded separately from
+  application failures.
 
 ## Testing
 
