@@ -15,6 +15,11 @@ jest.unstable_mockModule('../db/connection.js', () => ({
   default: {
     query: queryMock,
   },
+  pool: {
+    query: queryMock,
+    on: jest.fn(),
+    connect: jest.fn(),
+  },
   query: queryMock,
   getClient: jest.fn(),
   withTransaction: jest.fn(),
@@ -37,8 +42,12 @@ jest.unstable_mockModule('../services/sorobanService.js', () => ({
 }));
 
 const { default: app } = await import('../app.js');
-const { recordIndexerLedgers, recordScoreReconciliationRun, refreshWebhookRetryQueueDepth } =
-  await import('../middleware/metrics.js');
+const {
+  challengeNonceCounter,
+  recordIndexerLedgers,
+  recordScoreReconciliationRun,
+  refreshWebhookRetryQueueDepth,
+} = await import('../middleware/metrics.js');
 
 describe('GET /metrics', () => {
   beforeEach(() => {
@@ -54,6 +63,7 @@ describe('GET /metrics', () => {
   it('exposes default and custom Prometheus metrics', async () => {
     recordIndexerLedgers(42, 50);
     recordScoreReconciliationRun(new Date('2026-05-27T00:00:00.000Z'));
+    challengeNonceCounter.inc({ outcome: 'issued' });
     await refreshWebhookRetryQueueDepth();
 
     const response = await request(app).get('/metrics').set('x-api-key', 'test-metrics-key');
@@ -66,6 +76,7 @@ describe('GET /metrics', () => {
     expect(response.text).toContain('indexer_lag_ledgers 8');
     expect(response.text).toContain('webhook_retry_queue_depth 7');
     expect(response.text).toContain('score_reconciliation_last_run_timestamp');
+    expect(response.text).toContain('auth_challenge_nonce_total{outcome="issued"} 1');
     expect(response.text).toContain('http_request_duration_seconds_bucket');
   });
 

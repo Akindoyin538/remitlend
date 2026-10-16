@@ -1,32 +1,137 @@
-import { describe, it, expect, beforeAll } from '@jest/globals';
+import { describe, it, expect, beforeAll, beforeEach, jest } from '@jest/globals';
 import request from 'supertest';
-import app from '../app.js';
 import { Keypair } from '@stellar/stellar-sdk';
+import { randomUUID } from 'node:crypto';
+
+let testIpSequence = 20;
+const nextTestIp = (): string => `192.0.2.${testIpSequence++}`;
+
+const issuedChallenges = new Map<
+  string,
+  { messageHash: string; publicKey: string; issuedAtMs: number; expiresAt: number; consumed: boolean }
+>();
+const cacheStore = new Map<string, unknown>();
+const databaseQuery = jest.fn(async (sql: string, params: unknown[] = []) => {
+  if (sql.includes('INSERT INTO auth_challenge_nonces')) {
+    const [nonceHash, messageHash, publicKey, issuedAtMs, expiresAt] = params as [
+      string,
+      string,
+      string,
+      number,
+      Date,
+    ];
+    issuedChallenges.set(nonceHash, {
+      messageHash,
+      publicKey,
+      issuedAtMs,
+      expiresAt: expiresAt.getTime(),
+      consumed: false,
+    });
+    return { rows: [], rowCount: 1 };
+  }
+
+  if (sql.includes('UPDATE auth_challenge_nonces')) {
+    const [nonceHash, messageHash, publicKey, issuedAtMs] = params as [
+      string,
+      string,
+      string,
+      number,
+    ];
+    const challenge = issuedChallenges.get(nonceHash);
+    if (
+      challenge &&
+      challenge.messageHash === messageHash &&
+      challenge.publicKey === publicKey &&
+      challenge.issuedAtMs === issuedAtMs &&
+      challenge.expiresAt > Date.now() &&
+      !challenge.consumed
+    ) {
+      challenge.consumed = true;
+      return { rows: [{ nonce_hash: nonceHash }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  }
+
+  return { rows: [], rowCount: 0 };
+});
+
+jest.unstable_mockModule('../db/connection.js', () => ({
+  default: {
+    query: databaseQuery,
+    on: jest.fn(),
+    totalCount: 0,
+    idleCount: 0,
+    waitingCount: 0,
+    end: jest.fn(),
+  },
+  pool: {
+    query: databaseQuery,
+    on: jest.fn(),
+    totalCount: 0,
+    idleCount: 0,
+    waitingCount: 0,
+    end: jest.fn(),
+  },
+  query: databaseQuery,
+  getClient: jest.fn(),
+  withTransaction: jest.fn(),
+}));
+jest.unstable_mockModule('../services/cacheService.js', () => ({
+  cacheService: {
+    get: jest.fn(async (key: string) => cacheStore.get(key) ?? null),
+    set: jest.fn(async (key: string, value: unknown) => {
+      cacheStore.set(key, value);
+    }),
+    delete: jest.fn(async (key: string) => {
+      cacheStore.delete(key);
+    }),
+  },
+}));
+
+const { default: app } = await import('../app.js');
 
 describe('Auth API', () => {
+  beforeEach(() => {
+    cacheStore.clear();
+  });
+
   beforeAll(() => {
     process.env.JWT_SECRET = 'test-secret-key-for-jest';
+    app.set('trust proxy', 1);
   });
 
   describe('POST /api/auth/challenge', () => {
     it('should generate a challenge for a valid public key', async () => {
       const keypair = Keypair.random();
+      const idempotencyKey = randomUUID();
 
       const response = await request(app)
         .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', idempotencyKey)
         .send({ publicKey: keypair.publicKey() })
         .expect(200);
-
       expect(response.body.success).toBe(true);
       expect(response.body.data.message).toContain('Sign this message');
       expect(response.body.data.nonce).toBeDefined();
       expect(response.body.data.timestamp).toBeDefined();
       expect(response.body.data.expiresIn).toBe(5 * 60 * 1000);
+
+      const nextChallenge = await request(app)
+        .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', idempotencyKey)
+        .send({ publicKey: keypair.publicKey() })
+        .expect(200);
+
+      expect(nextChallenge.body.data.nonce).not.toBe(response.body.data.nonce);
     });
 
     it('should reject invalid public key', async () => {
       const response = await request(app)
         .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
         .send({ publicKey: 'invalid-key' })
         .expect(400);
 
@@ -34,7 +139,12 @@ describe('Auth API', () => {
     });
 
     it('should reject missing public key', async () => {
-      const response = await request(app).post('/api/auth/challenge').send({}).expect(400);
+      const response = await request(app)
+        .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
+        .send({})
+        .expect(400);
 
       expect(response.body.success).toBe(false);
     });
@@ -46,14 +156,19 @@ describe('Auth API', () => {
 
       const challengeResponse = await request(app)
         .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
         .send({ publicKey: keypair.publicKey() })
         .expect(200);
 
       const message = challengeResponse.body.data.message;
       const signature = keypair.sign(Buffer.from(message, 'utf-8')).toString('base64');
+      const loginIdempotencyKey = randomUUID();
 
       const loginResponse = await request(app)
         .post('/api/auth/login')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', loginIdempotencyKey)
         .send({
           publicKey: keypair.publicKey(),
           message,
@@ -64,6 +179,16 @@ describe('Auth API', () => {
       expect(loginResponse.body.success).toBe(true);
       expect(loginResponse.body.data.token).toBeDefined();
       expect(loginResponse.body.data.publicKey).toBe(keypair.publicKey());
+
+      const replayResponse = await request(app)
+        .post('/api/auth/login')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', loginIdempotencyKey)
+        .send({ publicKey: keypair.publicKey(), message, signature })
+        .expect(401);
+
+      expect(replayResponse.body.error.code).toBe('CHALLENGE_REPLAYED');
+      expect(replayResponse.headers['x-failed-attempts']).toBeDefined();
     });
 
     it('should reject invalid signature', async () => {
@@ -72,6 +197,8 @@ describe('Auth API', () => {
 
       const challengeResponse = await request(app)
         .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
         .send({ publicKey: keypair.publicKey() })
         .expect(200);
 
@@ -82,6 +209,8 @@ describe('Auth API', () => {
 
       const loginResponse = await request(app)
         .post('/api/auth/login')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
         .send({
           publicKey: keypair.publicKey(),
           message,
@@ -90,10 +219,25 @@ describe('Auth API', () => {
         .expect(401);
 
       expect(loginResponse.body.success).toBe(false);
+
+      const validSignature = keypair.sign(Buffer.from(message, 'utf-8')).toString('base64');
+      const retryResponse = await request(app)
+        .post('/api/auth/login')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
+        .send({ publicKey: keypair.publicKey(), message, signature: validSignature })
+        .expect(200);
+
+      expect(retryResponse.body.success).toBe(true);
     });
 
     it('should reject missing fields', async () => {
-      const response = await request(app).post('/api/auth/login').send({}).expect(400);
+      const response = await request(app)
+        .post('/api/auth/login')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
+        .send({})
+        .expect(400);
 
       expect(response.body.success).toBe(false);
     });
@@ -105,6 +249,8 @@ describe('Auth API', () => {
 
       const challengeResponse = await request(app)
         .post('/api/auth/challenge')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
         .send({ publicKey: keypair.publicKey() })
         .expect(200);
 
@@ -113,6 +259,8 @@ describe('Auth API', () => {
 
       const loginResponse = await request(app)
         .post('/api/auth/login')
+        .set('X-Forwarded-For', nextTestIp())
+        .set('Idempotency-Key', randomUUID())
         .send({
           publicKey: keypair.publicKey(),
           message,
@@ -166,6 +314,7 @@ describe('Auth API', () => {
       for (let i = 0; i < 11; i++) {
         lastResponse = await request(app)
           .post('/api/auth/challenge')
+          .set('Idempotency-Key', randomUUID())
           .set('X-Forwarded-For', '1.2.3.4')
           .send({ publicKey: keypair.publicKey() });
       }
@@ -187,6 +336,7 @@ describe('Auth API', () => {
       for (let i = 0; i < 6; i++) {
         lastResponse = await request(app)
           .post('/api/auth/login')
+          .set('Idempotency-Key', randomUUID())
           .set('X-Forwarded-For', '5.6.7.8')
           .send({
             publicKey: keypair.publicKey(),
@@ -212,6 +362,7 @@ describe('Auth API', () => {
       for (let i = 0; i < 6; i++) {
         lastResponse = await request(app)
           .post('/api/auth/login')
+          .set('Idempotency-Key', randomUUID())
           .set('X-Forwarded-For', `9.9.9.${i}`)
           .send({
             publicKey: keypair.publicKey(),

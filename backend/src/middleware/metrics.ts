@@ -14,6 +14,13 @@ export const traceContextCounter = new client.Counter({
   registers: [metricsRegistry],
 });
 
+export const challengeNonceCounter = new client.Counter({
+  name: 'auth_challenge_nonce_total',
+  help: 'Authentication challenge nonce outcomes.',
+  labelNames: ['outcome'] as const,
+  registers: [metricsRegistry],
+});
+
 export const chainConfirmationCounter = new client.Counter({
   name: 'chain_confirmation_total',
   help: 'Soroban transaction confirmation outcomes observed by the API (success, failed, not_found, error).',

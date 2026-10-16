@@ -35,6 +35,15 @@ export const idempotencyMiddleware = async (
     );
   }
 
+  // Auth challenges are short-lived and login challenges are one-time. Caching
+  // either response could return stale challenges or replay an issued JWT.
+  if (
+    req.method === 'POST' &&
+    (req.path === '/api/auth/challenge' || req.path === '/api/auth/login')
+  ) {
+    return next();
+  }
+
   if (!key) {
     return next();
   }

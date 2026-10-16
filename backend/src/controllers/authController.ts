@@ -22,7 +22,6 @@ export const registerTestUser = asyncHandler(
 import { AppError } from '../errors/AppError.js';
 import { ErrorCode } from '../errors/errorCodes.js';
 import {
-  generateChallenge,
   verifySignature,
   verifyChallengeTimestamp,
   generateJwtToken,
@@ -33,6 +32,7 @@ import {
   verifyRefreshToken,
 } from '../services/authService.js';
 import logger from '../utils/logger.js';
+import { consumeChallenge, issueChallenge } from '../services/challengeNonceService.js';
 
 const logAuthFailure = (req: Request, publicKey: string | undefined, reason: string): void => {
   logger.warn('Auth attempt failed', {
@@ -44,7 +44,7 @@ const logAuthFailure = (req: Request, publicKey: string | undefined, reason: str
   });
 };
 
-export const requestChallenge = (req: Request, res: Response): void => {
+export const requestChallenge = async (req: Request, res: Response): Promise<void> => {
   const { publicKey } = req.body;
 
   if (!publicKey || typeof publicKey !== 'string') {
@@ -54,7 +54,7 @@ export const requestChallenge = (req: Request, res: Response): void => {
 
   let challenge;
   try {
-    challenge = generateChallenge(publicKey);
+    challenge = await issueChallenge(publicKey);
   } catch (error) {
     if (error instanceof Error && error.message === 'Invalid Stellar public key') {
       logAuthFailure(req, publicKey, 'invalid_public_key');
@@ -73,7 +73,7 @@ export const requestChallenge = (req: Request, res: Response): void => {
   });
 };
 
-export const login = (req: Request, res: Response): void => {
+export const login = async (req: Request, res: Response): Promise<void> => {
   const { publicKey, message, signature } = req.body;
 
   if (!publicKey || typeof publicKey !== 'string') {
@@ -107,6 +107,14 @@ export const login = (req: Request, res: Response): void => {
   if (!isValidSignature) {
     logAuthFailure(req, publicKey, 'invalid_signature');
     throw AppError.unauthorized('Invalid signature', ErrorCode.INVALID_SIGNATURE);
+  }
+
+  if (!(await consumeChallenge(publicKey, message))) {
+    logAuthFailure(req, publicKey, 'challenge_replayed_or_unissued');
+    throw AppError.unauthorized(
+      'Challenge is invalid or has already been used',
+      ErrorCode.CHALLENGE_REPLAYED,
+    );
   }
 
   const token = generateJwtToken(publicKey);

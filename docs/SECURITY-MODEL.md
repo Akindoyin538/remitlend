@@ -19,12 +19,15 @@ Related security documents:
 
 ### 1. Challenge–signature–JWT (primary, for wallet users)
 
-1. **GET /api/auth/challenge?publicKey=G…** — server returns a one-time nonce
-   message valid for 5 minutes.
+1. **POST /api/auth/challenge** — server returns a one-time nonce message valid
+   for 5 minutes. PostgreSQL stores only SHA-256 digests of the nonce and exact
+   message, bound to the requesting wallet.
 2. Client signs the message with the Stellar Ed25519 private key.
-3. **POST /api/auth/verify** — server verifies the signature via
-   `Keypair.verify`, resolves the role for that public key (see [Role
-   resolution](#role-resolution) below), and mints a JWT.
+3. **POST /api/auth/login** — server verifies the signature via `Keypair.verify`
+   and atomically consumes the matching, unexpired database row before minting
+   a JWT. Concurrent redemption permits only one successful login; invalid
+   signatures do not consume the challenge. Database failures fail closed with
+   HTTP 503.
 4. The JWT is returned both in the JSON body and set as a `httpOnly`,
    `SameSite=strict` cookie named `remitlend_jwt` (overridable via
    `JWT_COOKIE_NAME` env var). The cookie is used for SSE/EventSource
@@ -47,6 +50,14 @@ JWT payload shape (`JwtPayload` in `authService.ts`):
 Subsequent requests supply the JWT via:
 - `Authorization: Bearer <token>` header, or
 - the `remitlend_jwt` cookie.
+
+The nonce is never stored in plaintext. Expired rows are pruned in bounded
+batches on challenge issuance. The global idempotency middleware still requires
+an `Idempotency-Key` on POST requests, but does not cache challenge or login
+responses: cached responses could return expired challenges or bypass nonce
+consumption. During rollout, apply the schema migration before deploying the
+new backend to all instances; mixed old/new login handlers do not provide
+fleet-wide replay protection.
 
 ### 2. API-key authentication (for backend services / admin tooling)
 
