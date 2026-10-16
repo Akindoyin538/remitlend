@@ -243,3 +243,6 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 
 <!-- handsoff-issue-340 -->
 - #340: frontend: add deterministic wallet and RPC test doubles
+
+<!-- handsoff-issue-576 -->
+- #576: ops: coordinate singleton scheduled jobs across horizontally scaled backend replicas
