@@ -256,6 +256,52 @@ For the full auth model (challenge-signature-JWT flow, role-scope table,
 API-key namespaces, cookie attributes) see
 [docs/SECURITY-MODEL.md](../docs/SECURITY-MODEL.md).
 
+## Container Hardening (Production)
+
+Production images and Compose services run with least privilege and an immutable
+root filesystem. The backend container:
+
+- Runs as the non-root `node` user (UID/GID 1000) with `no-new-privileges`.
+- Drops all Linux capabilities and adds back none.
+- Mounts the root filesystem read-only (`read_only: true`).
+- Receives only the writable paths it needs through explicit `tmpfs` mounts:
+  `/tmp` (build/scratch) and `/app/.cache` (runtime caches).
+- Reads secrets from the approved runtime mechanism (environment/secret files
+  injected by the orchestrator) — never baked into image layers.
+
+### Local development differences
+
+Local development is intentionally more permissive: `npm run dev` runs on the
+host with a writable filesystem and hot reload, and the Compose dev profile does
+not enable `read_only` or capability drops. Only the production profile applies
+the hardened runtime settings.
+
+### Production verification commands
+
+```bash
+# Confirm the process is not root and has no added capabilities
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend id
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend \
+  grep -E 'Cap(Eff|Prm|Bnd)' /proc/1/status
+
+# Confirm the root filesystem is read-only and tmpfs mounts are present
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend \
+  sh -c 'touch /app/forbidden 2>&1 || echo "rootfs is read-only"'
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend mount | grep tmpfs
+
+# Confirm health checks and graceful shutdown still work
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop backend
+
+# Scan images for privileged settings and unexpected writable paths
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  aquasec/trivy image --severity HIGH,CRITICAL remitlend-backend:latest
+```
+
+Integration tests assert that the production Compose service sets
+`read_only: true`, `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`,
+and declares the expected `tmpfs` writable paths, so regressions are caught in CI.
+
 ## Backend Performance Budgets
 
 The load-test workflow (`.github/workflows/load-test.yml`) enforces latency and
@@ -270,80 +316,3 @@ in `backend/perf/budgets.json` and compared against a stored baseline in
 | `/api/health`                  | GET    | 25       | 75       | 0.5%       | 256       | 0          | 0         |
 | `/api/score/:userId`           | GET    | 120      | 350      | 1.0%       | 384       | 4          | 0         |
 | `/api/score/simulate` (preview)| POST   | 200      | 600      | 1.0%       | 384       | 2          | 0         |
-
-Budgets are intentionally conservative and are adjusted only with evidence
-(see _Adjusting budgets_ below).
-
-### Reproducible benchmark environment
-
-Benchmarks run against a deterministic, isolated environment so results are
-comparable across runs:
-
-- **Warmup**: 30 requests per route are discarded before measurement to let the
-  JIT, connection pool, and prepared statements stabilize.
-- **Sample count**: 200 measured requests per route (minimum 100 enforced).
-- **Variance handling**: the runner reports p50/p95 plus the coefficient of
-  variation (CV). A run is marked `unstable` when CV > 0.15 and the workflow
-  fails with a `variance` reason instead of a `regression` reason, so flaky
-  infrastructure is not mistaken for an application regression.
-- **Isolation**: a dedicated Postgres service container and a mocked Soroban RPC
-  endpoint are used. No production data, wallet secrets, or value-bearing
-  transactions are ever sent — fixtures are synthetic and read-only.
-
-### Failure output
-
-When a budget is exceeded the workflow prints an actionable comparison against
-the stored baseline, for example:
-
-```
-FAIL /api/score/:userId p95
-  baseline: 310ms  current: 402ms  delta: +29.7%  budget: 350ms
-  reason: regression (CV 0.06, stable)
-  hint: check recent query changes in scoreController / scores index usage
-```
-
-Failures are classified as either `regression` (stable run, budget exceeded) or
-`external` (dependency instability detected via elevated error rate on the
-mocked RPC/DB health probe), so application regressions are distinguished from
-external dependency instability.
-
-### Adjusting budgets
-
-Budgets are only raised with evidence. To propose a change:
-
-1. Attach the failing run's baseline comparison and CV to the PR description.
-2. Confirm the regression is not caused by an external dependency (check the
-   `external` classification and the dependency health probe).
-3. Update `backend/perf/budgets.json` and regenerate `backend/perf/baseline.json`
-   from a clean run on `main`.
-4. Note the rationale in the PR so the performance review has a documented trail.
-
-## Project Structure
-
-```
-backend/
-├── src/
-│   ├── __tests__/           # Test files
-│   │   ├── health.test.ts
-│   │   ├── score.test.ts
-│   │   ├── validation.test.ts
-│   │   └── errorHandling.test.ts
-│   ├── config/              # Configuration files
-│   │   └── swagger.ts       # Swagger/OpenAPI config
-│   ├── controllers/         # Request handlers
-│   │   ├── scoreController.ts
-│   │   └── simulationController.ts
-│   ├── middleware/          # Express middleware
-│   │   ├── asyncHandler.ts  # Async error wrapper
-│   │   ├── auth.ts          # Authentication (planned)
-│   │   ├── errorHandler.ts  # Error handling
-│   │   ├── rateLimiter.ts   # Rate limiting
-│   │   └── validation.ts    # Request validation
-│   ├── routes/              # API routes
-│   │   └── index.ts
-│   ├── schemas/             # Zod validation schemas
-│   │   ├── scoreSchemas.ts
-│   │   └── simulationSchemas.ts
-│   ├── e
-
-/* … truncated 4977 chars — edit only what you need near the top … */
