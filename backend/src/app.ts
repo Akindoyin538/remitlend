@@ -40,6 +40,7 @@ import { pauseGuard } from './middleware/pauseGuard.js';
 import { deprecationHeadersMiddleware } from './middleware/deprecationHeaders.js';
 import { asyncHandler } from './utils/asyncHandler.js';
 import { AppError } from './errors/AppError.js';
+import logger from './utils/logger.js';
 import {
   setupConnectionLeakDetection,
   shutdownConnectionLeakDetection,
@@ -68,6 +69,10 @@ const allowedOriginsList = [configuredFrontendUrl, ...additionalAllowedOrigins].
 
 if (isProduction && allowedOriginsList.length === 0) {
   throw new Error('No allowed origins configured for CORS in production. Set FRONTEND_URL.');
+}
+
+if (isProduction && allowedOriginsList.some((origin) => origin.trim() === '*')) {
+  throw new Error('Wildcard CORS origin "*" is not allowed in production. Use explicit origins.');
 }
 
 const normalizeOrigin = (value: string) => value.trim().replace(/\/+$/, '').toLowerCase();
@@ -134,6 +139,7 @@ const corsOptions: cors.CorsOptions = {
       return callback(null, true);
     }
 
+    logger.warn('CORS origin rejected', { origin });
     return callback(AppError.forbidden('Origin is not allowed by CORS policy'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
