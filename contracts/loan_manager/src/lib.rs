@@ -63,6 +63,33 @@ pub enum LoanError {
     InsufficientCollateral = 26,
     LoanNotLiquidatable = 27,
     LoanNotPurgable = 28,
+    /// Direct setter called for a timelocked risk parameter; use
+    /// `propose_risk_change` / `execute_risk_change` instead.
+    TimelockRequired = 29,
+    /// No pending risk change exists for the requested parameter.
+    NoPendingRiskChange = 30,
+    /// A pending risk change already exists; cancel it before proposing again.
+    RiskChangePending = 31,
+    /// The pending risk change has not yet reached its execution ledger.
+    TimelockNotElapsed = 32,
+}
+
+/// Risk parameters that can only change through the propose → wait → execute
+/// timelock.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RiskParam {
+    LateFeeRate,
+    LiquidationThreshold,
+    LiquidationBonus,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingRiskChange {
+    pub value: u32,
+    /// First ledger sequence at which `execute_risk_change` may apply `value`.
+    pub eta_ledger: u32,
 }
 
 #[contracttype]
@@ -134,6 +161,8 @@ pub enum DataKey {
     MinRateBps,
     MaxRateBps,
     MigratedVersion,
+    /// risk parameter → change proposed but not yet executed or cancelled
+    PendingRiskChange(RiskParam),
 }
 
 #[contract]
@@ -158,6 +187,9 @@ impl LoanManager {
     const DEFAULT_LIQUIDATION_BONUS_BPS: u32 = 500;
     const MAX_LIQUIDATION_BONUS_BPS: u32 = 2000; // 20% cap on liquidation bonus
     const MIN_COLLATERAL_RATIO_BPS: i128 = 10_000;
+    /// Delay between proposing and executing a risk parameter change
+    /// (~1 day at 5-second ledgers).
+    const RISK_TIMELOCK_LEDGERS: u32 = 17_280;
     const MAX_RATIO_BPS: u32 = 10_000;
     const LATE_REPAYMENT_SCORE_PENALTY: i32 = 10;
     const DEFAULT_SCORE_PENALTY_POINTS: u32 = 50;
@@ -2072,47 +2104,129 @@ impl LoanManager {
         Ok(())
     }
 
-    pub fn set_late_fee_rate(env: Env, rate_bps: u32) -> Result<(), LoanError> {
-        Self::validate_late_fee_rate(rate_bps)?;
-        let admin = Self::admin(&env);
-        admin.require_auth();
-
-        let old_rate = Self::late_fee_rate_bps(&env);
-        env.storage()
-            .instance()
-            .set(&DataKey::LateFeeRateBps, &rate_bps);
-        Self::bump_instance_ttl(&env);
-        events::late_fee_rate_updated(&env, admin, old_rate, rate_bps);
-
-        Ok(())
+    /// Direct setters for timelocked risk parameters are disabled so the
+    /// admin cannot bypass the delay. Use `propose_risk_change` instead.
+    pub fn set_late_fee_rate(_env: Env, _rate_bps: u32) -> Result<(), LoanError> {
+        Err(LoanError::TimelockRequired)
     }
 
     pub fn get_late_fee_rate(env: Env) -> u32 {
         Self::late_fee_rate_bps(&env)
     }
 
-    pub fn set_liquidation_threshold(env: Env, ratio_bps: u32) -> Result<(), LoanError> {
-        Self::validate_liquidation_threshold(ratio_bps)?;
-        Self::admin(&env).require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::LiquidationThresholdBps, &ratio_bps);
-        Self::bump_instance_ttl(&env);
-        Ok(())
+    pub fn set_liquidation_threshold(_env: Env, _ratio_bps: u32) -> Result<(), LoanError> {
+        Err(LoanError::TimelockRequired)
     }
 
     pub fn get_liquidation_threshold(env: Env) -> u32 {
         Self::liquidation_threshold_bps(&env)
     }
 
-    pub fn set_liquidation_bonus_bps(env: Env, bonus_bps: u32) -> Result<(), LoanError> {
-        Self::validate_liquidation_bonus_bps(bonus_bps)?;
+    pub fn set_liquidation_bonus_bps(_env: Env, _bonus_bps: u32) -> Result<(), LoanError> {
+        Err(LoanError::TimelockRequired)
+    }
+
+    /// Queue a new value for a timelocked risk parameter. The value is
+    /// validated now and can be applied by `execute_risk_change` once
+    /// `RISK_TIMELOCK_LEDGERS` have elapsed. Only one pending change per
+    /// parameter is allowed; cancel it before proposing a replacement.
+    pub fn propose_risk_change(env: Env, param: RiskParam, value: u32) -> Result<(), LoanError> {
         Self::admin(&env).require_auth();
+        match param {
+            RiskParam::LateFeeRate => Self::validate_late_fee_rate(value)?,
+            RiskParam::LiquidationThreshold => Self::validate_liquidation_threshold(value)?,
+            RiskParam::LiquidationBonus => Self::validate_liquidation_bonus_bps(value)?,
+        }
+        let key = DataKey::PendingRiskChange(param);
+        if env.storage().instance().has(&key) {
+            return Err(LoanError::RiskChangePending);
+        }
+
+        let eta_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(Self::RISK_TIMELOCK_LEDGERS);
+        env.storage().instance().set(
+            &key,
+            &PendingRiskChange {
+                value,
+                eta_ledger,
+            },
+        );
+        Self::bump_instance_ttl(&env);
+        events::risk_change_proposed(&env, param, value, eta_ledger);
+
+        Ok(())
+    }
+
+    /// Apply a pending risk change once its timelock has elapsed.
+    pub fn execute_risk_change(env: Env, param: RiskParam) -> Result<(), LoanError> {
+        Self::admin(&env).require_auth();
+        let key = DataKey::PendingRiskChange(param);
+        let pending: PendingRiskChange = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(LoanError::NoPendingRiskChange)?;
+        if env.ledger().sequence() < pending.eta_ledger {
+            return Err(LoanError::TimelockNotElapsed);
+        }
+
+        let old_value = Self::risk_param_value(&env, param);
+        match param {
+            RiskParam::LateFeeRate => env
+                .storage()
+                .instance()
+                .set(&DataKey::LateFeeRateBps, &pending.value),
+            RiskParam::LiquidationThreshold => env
+                .storage()
+                .instance()
+                .set(&DataKey::LiquidationThresholdBps, &pending.value),
+            RiskParam::LiquidationBonus => env
+                .storage()
+                .instance()
+                .set(&DataKey::LiquidationBonusBps, &pending.value),
+        }
+        env.storage().instance().remove(&key);
+        Self::bump_instance_ttl(&env);
+        events::risk_change_executed(&env, param, old_value, pending.value);
+
+        Ok(())
+    }
+
+    /// Discard a pending risk change before it is executed.
+    pub fn cancel_risk_change(env: Env, param: RiskParam) -> Result<(), LoanError> {
+        Self::admin(&env).require_auth();
+        let key = DataKey::PendingRiskChange(param);
+        let pending: PendingRiskChange = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(LoanError::NoPendingRiskChange)?;
+        env.storage().instance().remove(&key);
+        Self::bump_instance_ttl(&env);
+        events::risk_change_cancelled(&env, param, pending.value);
+
+        Ok(())
+    }
+
+    pub fn get_pending_risk_change(env: Env, param: RiskParam) -> Option<PendingRiskChange> {
+        Self::bump_instance_ttl(&env);
         env.storage()
             .instance()
-            .set(&DataKey::LiquidationBonusBps, &bonus_bps);
-        Self::bump_instance_ttl(&env);
-        Ok(())
+            .get(&DataKey::PendingRiskChange(param))
+    }
+
+    pub fn get_risk_timelock_ledgers(_env: Env) -> u32 {
+        Self::RISK_TIMELOCK_LEDGERS
+    }
+
+    fn risk_param_value(env: &Env, param: RiskParam) -> u32 {
+        match param {
+            RiskParam::LateFeeRate => Self::late_fee_rate_bps(env),
+            RiskParam::LiquidationThreshold => Self::liquidation_threshold_bps(env),
+            RiskParam::LiquidationBonus => Self::liquidation_bonus_bps(env),
+        }
     }
 
     pub fn get_liquidation_bonus_bps(env: Env) -> u32 {
