@@ -136,6 +136,18 @@ pub enum DataKey {
     MigratedVersion,
 }
 
+/// Collateral expressed in debt-denominated units.
+///
+/// Only [`LoanManager::value_collateral`] constructs this type, so every
+/// ratio, threshold, and liquidation check consumes a valuation rather than a
+/// raw collateral token amount. Collateral and debt share `DataKey::Token`, so
+/// the current valuation is at par (1:1); a price source can be introduced at
+/// that single constructor without touching the ratio math.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollateralValuation {
+    pub debt_units: i128,
+}
+
 #[contract]
 pub struct LoanManager;
 
@@ -452,8 +464,15 @@ impl LoanManager {
         Ok(())
     }
 
+    /// Single point where raw collateral is converted into debt units.
+    fn value_collateral(collateral_amount: i128) -> CollateralValuation {
+        CollateralValuation {
+            debt_units: collateral_amount,
+        }
+    }
+
     fn is_collateral_ratio_below_threshold(
-        collateral_amount: i128,
+        collateral: CollateralValuation,
         total_debt: i128,
         threshold_bps: u32,
     ) -> bool {
@@ -461,11 +480,12 @@ impl LoanManager {
             return false;
         }
 
-        if collateral_amount <= 0 {
+        if collateral.debt_units <= 0 {
             return true;
         }
 
-        collateral_amount
+        collateral
+            .debt_units
             .checked_mul(Self::MAX_RATIO_BPS as i128)
             .expect("collateral ratio overflow")
             < total_debt
@@ -473,13 +493,14 @@ impl LoanManager {
                 .expect("collateral ratio overflow")
     }
 
-    fn current_ratio_bps(collateral_amount: i128, total_debt: i128) -> u32 {
-        if total_debt <= 0 || collateral_amount <= 0 {
+    fn current_ratio_bps(collateral: CollateralValuation, total_debt: i128) -> u32 {
+        if total_debt <= 0 || collateral.debt_units <= 0 {
             return 0;
         }
 
         let ratio = money::round_div(
-            collateral_amount
+            collateral
+                .debt_units
                 .checked_mul(Self::MAX_RATIO_BPS as i128)
                 .expect("collateral ratio overflow"),
             total_debt,
@@ -1572,7 +1593,7 @@ impl LoanManager {
         let (total_debt, _) = Self::current_total_debt(&env, &mut loan)?;
         let threshold_bps = Self::liquidation_threshold_bps(&env);
         Ok(Self::is_collateral_ratio_below_threshold(
-            loan.collateral_amount,
+            Self::value_collateral(loan.collateral_amount),
             total_debt,
             threshold_bps,
         ))
@@ -1594,7 +1615,10 @@ impl LoanManager {
         }
 
         let (total_debt, _) = Self::current_total_debt(&env, &mut loan)?;
-        let ratio_bps = Self::current_ratio_bps(loan.collateral_amount, total_debt);
+        let ratio_bps = Self::current_ratio_bps(
+            Self::value_collateral(loan.collateral_amount),
+            total_debt,
+        );
         Ok((loan.collateral_amount, total_debt, ratio_bps))
     }
 
@@ -1638,7 +1662,7 @@ impl LoanManager {
         };
         let threshold_bps = Self::liquidation_threshold_bps(&env);
         if !Self::is_collateral_ratio_below_threshold(
-            loan.collateral_amount,
+            Self::value_collateral(loan.collateral_amount),
             total_debt,
             threshold_bps,
         ) {
