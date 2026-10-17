@@ -506,6 +506,14 @@ impl LoanManager {
             .unwrap_or(Self::DEFAULT_GRACE_PERIOD_LEDGERS)
     }
 
+    /// Last ledger (inclusive) of the grace period that follows `due_date`.
+    /// Ledgers after this are late: late fees accrue and repayment is marked late.
+    fn grace_ends_ledger(env: &Env, due_date: u32) -> u32 {
+        due_date
+            .checked_add(Self::grace_period_ledgers(env))
+            .expect("grace period overflow")
+    }
+
     fn default_window_ledgers(env: &Env) -> u32 {
         Self::bump_instance_ttl(env);
         env.storage()
@@ -607,10 +615,7 @@ impl LoanManager {
             return 0;
         }
 
-        let grace_ends = loan
-            .due_date
-            .checked_add(Self::grace_period_ledgers(env))
-            .expect("grace period overflow");
+        let grace_ends = Self::grace_ends_ledger(env, loan.due_date);
         if current_ledger <= grace_ends {
             return 0;
         }
@@ -1216,10 +1221,7 @@ impl LoanManager {
         loan.term_ledgers = term_ledgers;
         loan.due_date = env.ledger().sequence() + term_ledgers;
         loan.last_interest_ledger = env.ledger().sequence();
-        loan.last_late_fee_ledger = loan
-            .due_date
-            .checked_add(Self::grace_period_ledgers(&env))
-            .expect("grace period overflow");
+        loan.last_late_fee_ledger = Self::grace_ends_ledger(&env, loan.due_date);
         Self::adjust_total_outstanding(&env, &token, transfer_amount);
 
         // Commit state before any cross-contract call (CEI pattern).
@@ -1358,11 +1360,7 @@ impl LoanManager {
             .checked_add(principal_payment)
             .expect("principal paid overflow");
 
-        let was_late = env.ledger().sequence()
-            > loan
-                .due_date
-                .checked_add(Self::grace_period_ledgers(&env))
-                .expect("grace period overflow");
+        let was_late = env.ledger().sequence() > Self::grace_ends_ledger(&env, loan.due_date);
 
         let mut completed = false;
 
