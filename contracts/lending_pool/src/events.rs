@@ -76,6 +76,20 @@ pub fn price_updated(
         .publish(topics, (ledger_seq, total_managed_assets, total_shares));
 }
 
+/// Emitted by `emergency_withdraw` after a successful payout. `proof` is
+/// `(assets_paid, idle_before, idle_after, managed_after)`, read from the
+/// authoritative token balance and internal accounting.
+pub fn emergency_solvency_proof(
+    env: &Env,
+    provider: Address,
+    token: Address,
+    proof: (i128, i128, i128, i128),
+) {
+    let topics = (Symbol::new(env, "EmergencySolvencyProof"), provider, token);
+    env.events()
+        .publish(topics, (env.ledger().sequence(), proof));
+}
+
 pub fn pause_flags_updated(env: &Env, flags: crate::PauseFlags) {
     let topics = (Symbol::new(env, "PauseFlagsUpdated"),);
     env.events().publish(topics, flags.flags);
