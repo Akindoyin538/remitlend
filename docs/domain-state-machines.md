@@ -283,6 +283,48 @@ unpaused ──► paused ──► unpaused
   example after a partial migration), the chain wins and the API state is
   reconciled from indexer events.
 
+### Lending pool pause matrix
+
+**Source of truth:** `contracts/lending_pool/src/lib.rs` (`PauseFlags`, the
+`pause*`/`unpause*` admin functions, and the `is_*_paused` views).
+
+The lending pool has a global `Paused` flag plus three per-operation bits. An
+operation is blocked when either its bit or the global flag is set.
+
+| Entry point | Global `Paused` | Deposits bit (1) | Withdrawals bit (2) | Yield bit (4) |
+|---|---|---|---|---|
+| `deposit` | blocked | blocked | allowed | allowed |
+| `withdraw` | blocked | allowed | blocked | allowed |
+| `distribute_yield` | blocked | allowed | allowed | blocked |
+| `emergency_withdraw` | **not checked** | **not checked** | **not checked** | **not checked** |
+
+- `emergency_withdraw` skips the pause checks and the withdrawal cooldown by
+  design, so providers can always exit. It also ignores the global `Paused`
+  flag.
+- Views (`get_*`, `preview_*`, `is_*`) are never blocked.
+
+**Admin controls** (all require admin auth):
+
+- Global: `pause`, `unpause`.
+- Per-operation: `pause_deposits_only`, `pause_withdrawals_only`,
+  `pause_yield_only`, `unpause_deposits`, `unpause_withdrawals`,
+  `unpause_yield`, `unpause_all`. Each changes only its own bit.
+- Bulk: `set_pause_flags(pause_deposits, pause_withdrawals, pause_yield)`
+  sets all three bits at once.
+
+**Queryable state:** `is_paused` (global), `is_deposits_paused`,
+`is_withdrawals_paused`, `is_yield_paused`, `is_any_paused`, and
+`get_pause_flags_raw` (bit field: 1 = deposits, 2 = withdrawals, 4 = yield).
+
+**Events:** `PoolPaused` / `PoolUnpaused` for the global flag, and
+`PauseFlagsUpdated` (data: raw `u32` bit field) for every per-operation change.
+The backend indexer maps only `PoolPaused` / `PoolUnpaused` to the API-wide
+pause state, so a per-operation pause does not block API requests. The chain
+rejects the blocked operation instead.
+
+**Not yet cascaded:** the loan manager's `require_not_paused` checks only the
+pool's global `is_paused()`, not the per-operation bits.
+
 ---
 
 ## Cross-layer invariants
