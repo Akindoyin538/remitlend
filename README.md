@@ -243,3 +243,6 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 
 <!-- handsoff-issue-340 -->
 - #340: frontend: add deterministic wallet and RPC test doubles
+
+<!-- handsoff-issue-539 -->
+- #539: frontend: model loan application as a resumable, validated state machine
