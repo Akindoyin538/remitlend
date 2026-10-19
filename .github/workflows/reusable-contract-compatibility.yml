@@ -1,9 +1,11 @@
 # Issue #407 – Deployed-contract compatibility suite
 # Issue #409 – Packaged as a least-privilege reusable workflow.
+# Issue #246 – Validates storage migration manifests for every contract version.
 #
 # Validates that the env-var contract IDs are well-formed, present in
-# docs/deployed-contracts.md, and that the configured RPC is reachable.
-# The check is read-only and requires no elevated permissions.
+# docs/deployed-contracts.md, that the configured RPC is reachable, and that
+# every contract version has a storage migration manifest with a documented
+# rollback path. The check is read-only and requires no elevated permissions.
 name: Contract Compatibility (reusable)
 
 on:
@@ -38,3 +40,14 @@ jobs:
           LENDING_POOL_CONTRACT_ID: ${{ secrets.LENDING_POOL_CONTRACT_ID }}
           REMITTANCE_NFT_CONTRACT_ID: ${{ secrets.REMITTANCE_NFT_CONTRACT_ID }}
           MULTISIG_GOVERNANCE_CONTRACT_ID: ${{ secrets.MULTISIG_GOVERNANCE_CONTRACT_ID }}
+      - name: Validate storage migration manifests
+        # Issue #246 – Every contract version must ship a storage migration
+        # manifest (version id, storage keys/layout, migration steps, rollback
+        # path). This step fails closed if any manifest is missing or malformed
+        # so a version cannot be deployed without a documented migration.
+        run: node scripts/check-migration-manifests.mjs
+        env:
+          MIGRATION_MANIFEST_DIR: contracts/migrations
+          # Fail the job (rather than warn) when a manifest is absent so the
+          # compatibility gate stays authoritative.
+          MIGRATION_MANIFEST_STRICT: "true"

@@ -138,6 +138,79 @@ caller cannot partially reconcile a transfer.
   category.
 - Audit events record who classified or reconciled a transfer and when.
 
+## Contract Storage Migration Manifests
+
+Every contract version declares a **storage migration manifest** describing its
+persisted storage layout and the migration path from the previous version. The
+manifest is the single source of truth for what a version stores and how it is
+transformed, so deployed contracts and persisted on-chain data remain
+compatible across upgrades.
+
+### Manifest Contents
+
+Each manifest captures, for one contract version:
+
+- **Version identifier**: the contract version the manifest describes and the
+  version it migrates from (the genesis version has no predecessor).
+- **Storage keys and layout**: every persisted key, its type, and its ordering,
+  so the expected storage shape can be validated before and after migration.
+- **Migration steps**: the ordered, deterministic transformations applied to
+  move data from the previous version's layout to this version's layout.
+
+Manifests are declared for every contract version, including versions that
+require no transformation (an empty step list), so the absence of a manifest is
+itself a detectable error rather than an implicit no-op.
+
+### Compatibility
+
+- Migrations are **additive by default**: new keys are introduced and existing
+  keys retain their meaning and encoding.
+- A migration that must change or remove an existing key is explicitly marked
+  **breaking** in its manifest and must document a rollback path.
+- Persisted data written by a prior version remains readable; a version never
+  silently reinterprets existing bytes.
+
+### Validation and Bounded Resource Usage
+
+- Before a migration runs, preconditions are validated: the on-chain version
+  must match the manifest's `from` version, and the observed storage shape must
+  match the manifest's declared layout. A mismatch aborts the migration before
+  any write.
+- Migration steps are applied in bounded batches with a hard iteration cap, so a
+  large storage set cannot exhaust resources or block the request path.
+
+### Authorization
+
+Only an `admin`/`operator` role may trigger a migration. Authorization is
+checked before any state mutation, so an unauthorized caller cannot partially
+migrate storage.
+
+### Failure, Retry, and Stale Data
+
+- Migrations are idempotent per step: a step that has already been applied is
+  detected and skipped, so a retry after a partial failure resumes safely.
+- Dependency failures (unreachable node or indexer) are reported separately from
+  validation failures and are retryable; validation failures are not retried
+  until the precondition is corrected.
+- Stale storage reads are never used to derive user-visible state; the
+  authoritative on-chain version and layout are re-read before a migration step
+  is applied.
+
+### Rollback
+
+- Additive migrations roll back by disabling the migration job; no persisted
+  data needs to be rewritten.
+- Breaking migrations declare an explicit reverse manifest so the prior layout
+  can be restored from the new one.
+
+### Observability
+
+- Structured errors are emitted for authorization failures, precondition
+  failures, and dependency failures.
+- Metrics are recorded for migrations started, completed, skipped, and failed
+  per contract version.
+- Audit events record who triggered a migration, the from/to versions, and when.
+
 ## Observability
 
 - Structured errors are emitted for budget violations and dependency failures.
@@ -150,4 +223,4 @@ caller cannot partially reconcile a transfer.
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Donation and unsolicited-transfer reconciliation has focused tests covering success, authorization failure, boundary values (empty references, non-positive amounts, unknown categories), bounded batch limits, retries, stale data, and dependency failure paths.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Donation and unsolicited-transfer reconciliation has focused tests covering success, authorization failure, boundary values, retries, stale data, and dependency failure paths. Contract storage migration manifests have focused tests covering version-match validation, storage-shape validation, additive and breaking migrations, idempotent retry after partial failure, and rollback.
