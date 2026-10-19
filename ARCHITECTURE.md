@@ -162,75 +162,59 @@ emit the event.
 - Rotation state (current minter, rotation index, last-rotation timestamp) is
   persisted on-chain and readable, so off-chain consumers can reconcile.
 
-## Deterministic Liquidation Unwind Policy
+## Loan Cancellation and Expired-Request Cleanup
 
-When a loan becomes liquidatable, the contracts apply a **deterministic unwind
-policy** rather than an open-ended auction. The policy is a pure function of
-on-chain state (collateral, debt, oracle price, and configured parameters), so
-the same inputs always produce the same unwind plan and settlement outcome.
-This keeps financial arithmetic and user-visible status derived from
-authoritative on-chain sources only.
+Loan requests can be cancelled before disbursement, and expired requests are
+reclaimed by a bounded cleanup routine. Both paths are idempotent and preserve
+the existing loan-request storage layout.
 
-### Authorization
+### Cancellation Authorization
 
-- Anyone may trigger `liquidate(loanId)` once the loan is liquidatable; the
-  policy itself constrains the outcome, so permissionless triggering cannot
-  extract more than the deterministic plan allows.
-- The liquidator receives a bounded incentive (capped liquidation bonus) taken
-  from the collateral, never from other borrowers or the pool's principal.
-- A privileged `pauseLiquidation` / `unpauseLiquidation` (owner/admin only) can
-  halt unwinds during incident response; unauthorized callers are rejected with
-  `NotAuthorized` before any state is read.
+`cancelLoanRequest` is callable by the borrower, the assigned lender, or the
+contract admin. Any other caller is rejected with `NotAuthorized` before any
+state is read or written. Cancellation is only permitted from pre-disbursement
+states (`Pending`, `Approved`); requests already `Disbursed`, `Repaid`,
+`Cancelled`, or `Expired` are rejected with `AlreadyTerminal`.
 
-### Validation and Structured Errors
+### Expired-Request Cleanup
 
-- `NotLiquidatable` — health factor is at or above the liquidation threshold.
-- `AlreadyUnwinding` — the loan is already in the unwind state (idempotency
-  guard against duplicate triggers).
-- `StalePrice` — the oracle price is older than `maxPriceAge`; unwinds never
-  settle against stale data.
-- `InvalidPrice` — the oracle returned a non-positive price.
-- `LiquidationPaused` — unwinds are administratively paused.
-- `InsufficientCollateral` — the deterministic plan would exceed available
-  collateral; the plan is clamped to the collateral actually held.
+`cleanupExpiredRequests` processes at most `maxBatch` expired requests per call
+and returns the number processed, so iteration and gas are bounded regardless
+of backlog size. Each request is transitioned to `Expired` exactly once;
+re-processing an already-terminal request is a no-op, making the routine
+idempotent and safe to retry. Callers may page through the backlog by invoking
+the routine repeatedly until it returns zero.
 
-### Deterministic Plan and Bounded Resource Usage
+### Structured Errors and Events
 
-- The unwind plan is computed in a single pass over the loan's collateral
-  entries with a hard `maxCollateralEntries` cap; exceeding the cap reverts with
-  `TooManyCollateralEntries` rather than looping unboundedly.
-- The repay amount is `min(debt, collateralValue * closeFactor)` using integer
-  minor units and basis points, so arithmetic is exact and never over-repays.
-- The liquidation bonus is capped by `maxLiquidationBonusBps`; the plan never
-  transfers more collateral than is held.
-- No unbounded loops, external calls in loops, or unbounded retries exist in the
-  unwind path.
+- `NotAuthorized` — caller is not borrower, lender, or admin.
+- `AlreadyTerminal` — request is not in a cancellable state.
+- `NotExpired` — cleanup was asked to expire a request whose deadline has not
+  passed.
+- `LoanRequestCancelled(requestId, caller)` — emitted on successful
+  cancellation.
+- `LoanRequestExpired(requestId)` — emitted once per request transitioned by
+  cleanup.
 
-### Failure, Retry, and Rollback
+### Compatibility and Migration
 
-- Reverts are atomic: a failed unwind leaves debt, collateral, and loan status
-  unchanged, so a caller can safely retry after fixing the precondition (e.g.
-  waiting for a fresh oracle price).
-- Transient dependency failures (oracle/RPC unavailability) surface as typed
-  errors distinct from policy rejections and may be retried with bounded
-  attempts off-chain.
-- Rollback is administrative: `pauseLiquidation` halts unwinds without a
-  redeploy, and unpausing restores the prior deterministic behavior.
+- The loan-request struct and its storage slots are unchanged; no migration is
+  required and persisted data remains readable by existing consumers.
+- New entrypoints are additive; existing disbursement and repayment paths are
+  unaffected.
+- Off-chain consumers should treat `Cancelled` and `Expired` as terminal
+  statuses and derive user-visible status from on-chain state.
 
-### Observability and Audit
+### Rollout and Rollback
 
-- Every unwind emits a `LiquidationUnwound` event carrying the loan id, repaid
-  amount, seized collateral, bonus paid, and the oracle price used, forming an
-  on-chain audit trail.
-- Rejected unwinds revert with their structured error code and emit no event.
-- Off-chain consumers derive loan status from these events and on-chain state,
-  never from client-side estimates.
+- Deploy the additive entrypoints alongside the existing contract; no consumer
+  changes are required to keep current behavior.
+- Rollback is a configuration change: operators can stop invoking cleanup
+  without a redeploy, and cancellation can be disabled by pausing the
+  entrypoint.
 
-### Compatibility and Rollout
+### Observability
 
-- The unwind policy is additive: existing loan, collateral, and repayment
-  entrypoints are unchanged, and persisted loan records remain readable.
-- Rollout is staged: deploy the policy, enable it behind the pause flag, verify
-  against a staging oracle, then unpause in production.
-- Because the plan is deterministic, off-chain indexers and API consumers can
-  reproduce the expected outcome before the transaction lands.
+Cancellation and cleanup outcomes (success, unauthorized, already-terminal,
+expired) emit structured events and are recorded as metrics so operators can
+alert on unexpected rejection rates or cleanup backlogs.
