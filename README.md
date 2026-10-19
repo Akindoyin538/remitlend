@@ -243,3 +243,6 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 
 <!-- handsoff-issue-340 -->
 - #340: frontend: add deterministic wallet and RPC test doubles
+
+<!-- handsoff-issue-535 -->
+- #535: contracts: make pool rate changes continuous and non-retroactive
