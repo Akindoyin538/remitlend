@@ -71,6 +71,48 @@ borrower is never asked to sign a request whose cost cannot be computed.
 
 See [docs/loan-cost-disclosure.md](docs/loan-cost-disclosure.md).
 
+## NFT Transfer Authorization
+
+NFT transfers that require an off-chain signature use a domain-separated,
+EIP-712-style typed digest. The digest binds the authorization to the chain
+(`chainId`), the verifying contract address, and a transfer-specific typehash /
+purpose tag, so a signature produced for one domain or purpose can never be
+replayed against another. The signed payload additionally binds the token
+address, `from`, `to`, `tokenId`, a per-signer `nonce`, and a `deadline`.
+
+### Validation
+
+- The domain (chain id, verifying contract, typehash) must match the deployed
+  contract exactly; mismatches are rejected with an explicit error.
+- The payload fields must match the transfer being executed; any mismatch is
+  rejected.
+- Expired authorizations (`deadline` in the past) are rejected.
+- Nonces are single-use; a replayed nonce is rejected.
+
+### Compatibility and Rollout
+
+The existing transfer entrypoints remain unchanged and continue to work. The
+domain-separated authorization path is versioned and opt-in, so deployed
+contracts and existing API consumers are unaffected until they explicitly
+adopt the new path. Rollout is staged: deploy the new path alongside the legacy
+entrypoint, migrate consumers, then retire the legacy path in a later release.
+
+### Failure, Retry, and Rollback
+
+- Authorization failures are typed and surfaced to the caller; they are not
+  retried automatically because a rejected signature will not become valid on
+  retry.
+- Transient dependency failures (e.g. RPC unavailability) are distinguished
+  from authorization failures and may be retried with bounded attempts.
+- Rollback is a configuration change: consumers can fall back to the legacy
+  entrypoint without a contract redeploy.
+
+### Observability
+
+Authorization failures emit structured errors carrying the failure category
+(domain mismatch, payload mismatch, expired, replayed nonce) without exposing
+signature material, and are recorded as metrics for alerting.
+
 ## Transaction Recovery
 
 Every wallet-connected failure is classified into a typed failure state
@@ -98,4 +140,4 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. NFT transfer authorization has focused tests covering success, domain and payload mismatches, expired deadlines, replayed nonces, and dependency failure paths.
