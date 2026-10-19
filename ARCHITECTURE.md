@@ -113,6 +113,57 @@ Authorization failures emit structured errors carrying the failure category
 (domain mismatch, payload mismatch, expired, replayed nonce) without exposing
 signature material, and are recorded as metrics for alerting.
 
+## Bounded Authorized-Minter Rotation
+
+Minter rotation is a privileged, owner/admin-only operation that replaces the
+contract's authorized minter. It is deliberately bounded so a compromised or
+buggy admin key cannot churn the minter set without limit.
+
+### Authorization
+
+- Only the contract owner/admin may call `rotateMinter`. Any other caller is
+  rejected with a distinct `NotAuthorized` error before any state is read or
+  written.
+- Authorization is checked first so unauthorized callers cannot probe rotation
+  state (current minter, rotation index, cooldown) through revert reasons.
+
+### Validation and Structured Errors
+
+Inputs are validated with distinct, documented error codes so callers and
+monitoring can tell failure modes apart:
+
+- `NotAuthorized` — caller is not the owner/admin.
+- `ZeroAddress` — the proposed minter is the zero address.
+- `UnchangedMinter` — the proposed minter equals the current minter.
+- `RotationLimitReached` — the maximum number of rotations has been consumed.
+- `RotationCooldown` — the cooldown between rotations has not elapsed.
+
+### Bounded Resource Usage
+
+- A hard `maxRotations` cap bounds the total number of rotations over the
+  contract's lifetime; once reached, further rotations revert with
+  `RotationLimitReached`.
+- A `rotationCooldown` enforces a minimum interval between rotations, bounding
+  the rate of change even while the cap is not yet exhausted.
+- Both bounds are checked before mutating state, so a rejected rotation leaves
+  the current minter, rotation index, and timestamps untouched.
+
+### Observability and Audit
+
+Every successful rotation emits a `MinterRotated` event carrying the previous
+minter, the new minter, and the rotation index, providing an on-chain audit
+trail. Rejected rotations revert with their structured error code and do not
+emit the event.
+
+### Compatibility and Rollback
+
+- The existing minter authorization surface is preserved; rotation only changes
+  which address is authorized, not how authorization is consumed.
+- Rotation state (current minter, rotation index, last-rotation timestamp) is
+  persisted on-chain and readable, so off-chain consumers can reconcile.
+- Rollback is an owner/admin rotation back to a prior minter, subject to the
+  same bounds; no redeploy is required.
+
 ## Transaction Recovery
 
 Every wallet-connected failure is classified into a typed failure state
@@ -140,4 +191,4 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. NFT transfer authorization has focused tests covering success, domain and payload mismatches, expired deadlines, replayed nonces, and dependency failure paths.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. NFT transfer authorization has focused tests covering success, domain and payload mismatches, expired deadlines, replayed nonces, and dependency failure paths. Minter rotation has focused tests covering success, unauthorized callers, zero-address and unchanged-minter inputs, the rotation cap and cooldown boundaries, and the emitted `MinterRotated` audit event.
