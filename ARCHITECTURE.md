@@ -161,34 +161,76 @@ emit the event.
   which address is authorized, not how authorization is consumed.
 - Rotation state (current minter, rotation index, last-rotation timestamp) is
   persisted on-chain and readable, so off-chain consumers can reconcile.
-- Rollback is an owner/admin rotation back to a prior minter, subject to the
-  same bounds; no redeploy is required.
 
-## Transaction Recovery
+## Deterministic Liquidation Unwind Policy
 
-Every wallet-connected failure is classified into a typed failure state
-(`rejected`, `expired`, `failed`, `unknown`) and turned into a recovery plan by
-a pure function (`planTransactionRecovery`). The plan always states whether
-resubmission is safe. **Once a signed transaction has been handed to the
-network, the plan contains no action that can create a second one** — the only
-safe actions are re-polling the same hash, inspecting the explorer, copying the
-transaction id, reloading, or contacting support. Status polling is bounded
-(`maxAttempts`, `requestTimeoutMs`, overall `timeoutMs`) and abort-aware, and it
-reports a dependency failure separately from a settled failure so an unreachable
-node is never presented as a failed transaction.
+When a loan becomes liquidatable, the contracts apply a **deterministic unwind
+policy** rather than an open-ended auction. The policy is a pure function of
+on-chain state (collateral, debt, oracle price, and configured parameters), so
+the same inputs always produce the same unwind plan and settlement outcome.
+This keeps financial arithmetic and user-visible status derived from
+authoritative on-chain sources only.
 
-See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
+### Authorization
 
-## Observability
+- Anyone may trigger `liquidate(loanId)` once the loan is liquidatable; the
+  policy itself constrains the outcome, so permissionless triggering cannot
+  extract more than the deterministic plan allows.
+- The liquidator receives a bounded incentive (capped liquidation bonus) taken
+  from the collateral, never from other borrowers or the pool's principal.
+- A privileged `pauseLiquidation` / `unpauseLiquidation` (owner/admin only) can
+  halt unwinds during incident response; unauthorized callers are rejected with
+  `NotAuthorized` before any state is read.
 
-- Structured errors are emitted for budget violations and dependency failures.
-- Metrics are recorded for route load, render, and bundle dimensions.
-- Operational diagnostics distinguish between unsupported environments and genuine regressions.
-- Transaction failures are classified before they reach the UI, and carry a
-  non-identifying support code (failure category, truncated transaction hash,
-  attempt counter) so a support ticket can be correlated without exposing user
-  data.
+### Validation and Structured Errors
 
-## Testing
+- `NotLiquidatable` — health factor is at or above the liquidation threshold.
+- `AlreadyUnwinding` — the loan is already in the unwind state (idempotency
+  guard against duplicate triggers).
+- `StalePrice` — the oracle price is older than `maxPriceAge`; unwinds never
+  settle against stale data.
+- `InvalidPrice` — the oracle returned a non-positive price.
+- `LiquidationPaused` — unwinds are administratively paused.
+- `InsufficientCollateral` — the deterministic plan would exceed available
+  collateral; the plan is clamped to the collateral actually held.
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. NFT transfer authorization has focused tests covering success, domain and payload mismatches, expired deadlines, replayed nonces, and dependency failure paths. Minter rotation has focused tests covering success, unauthorized callers, zero-address and unchanged-minter inputs, the rotation cap and cooldown boundaries, and the emitted `MinterRotated` audit event.
+### Deterministic Plan and Bounded Resource Usage
+
+- The unwind plan is computed in a single pass over the loan's collateral
+  entries with a hard `maxCollateralEntries` cap; exceeding the cap reverts with
+  `TooManyCollateralEntries` rather than looping unboundedly.
+- The repay amount is `min(debt, collateralValue * closeFactor)` using integer
+  minor units and basis points, so arithmetic is exact and never over-repays.
+- The liquidation bonus is capped by `maxLiquidationBonusBps`; the plan never
+  transfers more collateral than is held.
+- No unbounded loops, external calls in loops, or unbounded retries exist in the
+  unwind path.
+
+### Failure, Retry, and Rollback
+
+- Reverts are atomic: a failed unwind leaves debt, collateral, and loan status
+  unchanged, so a caller can safely retry after fixing the precondition (e.g.
+  waiting for a fresh oracle price).
+- Transient dependency failures (oracle/RPC unavailability) surface as typed
+  errors distinct from policy rejections and may be retried with bounded
+  attempts off-chain.
+- Rollback is administrative: `pauseLiquidation` halts unwinds without a
+  redeploy, and unpausing restores the prior deterministic behavior.
+
+### Observability and Audit
+
+- Every unwind emits a `LiquidationUnwound` event carrying the loan id, repaid
+  amount, seized collateral, bonus paid, and the oracle price used, forming an
+  on-chain audit trail.
+- Rejected unwinds revert with their structured error code and emit no event.
+- Off-chain consumers derive loan status from these events and on-chain state,
+  never from client-side estimates.
+
+### Compatibility and Rollout
+
+- The unwind policy is additive: existing loan, collateral, and repayment
+  entrypoints are unchanged, and persisted loan records remain readable.
+- Rollout is staged: deploy the policy, enable it behind the pause flag, verify
+  against a staging oracle, then unpause in production.
+- Because the plan is deterministic, off-chain indexers and API consumers can
+  reproduce the expected outcome before the transaction lands.

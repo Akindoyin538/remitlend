@@ -77,7 +77,7 @@ We strictly follow the [Conventional Commits](https://www.conventionalcommits.or
 - **refactor**: A code change that neither fixes a bug nor adds a feature.
 - **perf**: A code change that improves performance.
 - **test**: Adding missing tests or correcting existing tests.
-- **chore**: Changes to the build process or auxiliary tools and libraries.
+- **chore**: Changes to the build process or auxiliary tools/libraries.
 
 **Example**: `feat(contracts): add flash loan prevention to lending pool`
 
@@ -92,6 +92,27 @@ When opening a PR, ensure your description includes:
     - [ ] Tests have been added/updated and pass.
     - [ ] Documentation has been updated.
     - [ ] Commit messages follow standards.
+
+### Contracts Change Requirements
+
+Changes under `contracts/` affect deployed, stateful on-chain code, so PRs touching them must additionally document:
+
+- **Threat model**: who can call the new/changed entry points, what they can influence, and the abuse cases considered (reentrancy, griefing, front-running, unauthorized callers).
+- **Authorization**: the exact auth checks (e.g. `require_auth`, admin/role gates) guarding each state-changing path, and the failure mode when they are not met.
+- **Compatibility impact**: whether storage keys, event shapes, or entry-point signatures change, and how existing deployed contracts, API consumers, and persisted data remain readable (or the migration path if not).
+- **Rollout & rollback**: ordered deployment steps (e.g. initialize → configure → enable) and how to safely revert if a step misbehaves.
+- **Verification evidence**: the narrowest relevant `cargo test` output plus any integration/e2e scenario exercising the full workflow.
+
+#### Liquidation & Unwind Policy
+
+When a loan becomes delinquent, contracts must resolve it through a **deterministic unwind policy** rather than ad-hoc admin action. Contributors implementing or modifying this path must ensure:
+
+- **Authorization**: only the configured liquidator role (or an authorized keeper) may trigger an unwind; unauthorized callers fail with an explicit error and emit no state change.
+- **Determinism**: the unwind outcome (collateral seizure, remaining balance, status transition) is a pure function of on-chain state — no wall-clock or off-chain inputs beyond the ledger timestamp already recorded.
+- **Bounded work**: any iteration over collateral, tranches, or schedules is capped by a configured maximum; exceeding the cap fails closed rather than looping unbounded.
+- **Idempotency & retries**: re-invoking an unwind on an already-unwound loan is a no-op or explicit error, never a double-seizure; partial failures leave state consistent for a safe retry.
+- **Observability**: emit structured events (loan id, prior status, seized amount, remaining balance, caller) and expose read-only status derived from authoritative on-chain state.
+- **Tests**: cover success, authorization failure, boundary values (zero/at-cap collateral), retry/idempotency, and stale or dependency-failure paths.
 
 ## Environment Variables
 
@@ -195,40 +216,4 @@ suite and runs in CI.
   retried.
 - Stale or unavailable data (dependency failure) and authorization failure
   states.
-- Boundary values: zero, minimum, and maximum representable amounts.
-
-**Rules for visual regression tests:**
-
-- Derive every displayed amount, status, and chain state from the same
-  authoritative source the app uses at runtime (API/contract responses or the
-  shared financial formatting utilities). **Never hard-code or mock financial
-  arithmetic in a story or snapshot** — a mocked number can silently diverge
-  from production.
-- Cover the success path plus the failure paths listed above (authorization
-  failure, boundary values, retries, stale data, dependency failure) for each
-  critical financial surface you touch.
-- Keep snapshots deterministic: pin the viewport, freeze time and locale, and
-  disable animations (`prefers-reduced-motion`) so diffs reflect real changes
-  only.
-- When a visual change is intentional, update the baseline in the same PR and
-  call it out in the PR description with before/after images.
-
-**Running locally:**
-
-```bash
-cd frontend
-npm run build
-npx playwright test e2e/visual --project=chromium --update-snapshots
-```
-
-Omit `--update-snapshots` to verify against the committed baselines the way CI
-does. New critical financial surfaces must add their route/state to the visual
-regression suite in the same PR that introduces them.
-
-## Style Guides
-
-- **TypeScript**: Use functional components and hooks. Prefer `interface` over `type`. Ensure strict typing.
-- **Rust**: Follow standard Rust naming conventions and maintain idiomatic code.
-
----
-Thank you for contributing to RemitLend! 🚀
+- Boundary value
