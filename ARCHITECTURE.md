@@ -86,6 +86,58 @@ node is never presented as a failed transaction.
 
 See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
+## Donation and Unsolicited-Transfer Reconciliation
+
+Inbound transfers that were not initiated by a known application flow are
+reconciled inside the contracts boundary. Two categories are recognized:
+
+- **Donation**: an unsolicited inbound transfer the recipient explicitly accepts
+  as a donation.
+- **Unsolicited transfer**: an inbound transfer that is not a donation and must
+  be classified before it affects any user-visible balance or status.
+
+### Authorization
+
+Classification and reconciliation are privileged operations. Only an
+`admin`/`operator` role may classify or reconcile a transfer; any other caller
+receives an explicit authorization failure and the transfer remains in its
+prior state. Authorization is checked before any state mutation so a rejected
+caller cannot partially reconcile a transfer.
+
+### Validation and Bounded Resource Usage
+
+- Transfer references must be non-empty and well-formed; amounts are `bigint`
+  minor units and must be positive.
+- Classification must be one of the recognized categories; unknown values are
+  rejected rather than defaulted.
+- Reconciliation processes transfers in bounded batches (`maxBatchSize`) with a
+  hard iteration cap, so a large backlog cannot exhaust resources or block the
+  request path.
+
+### Failure, Retry, and Stale Data
+
+- Dependency failures (unreachable node or indexer) are reported separately from
+  settled failures and are retryable; settled classifications are not retried.
+- Stale transfer data is never used to derive a user-visible balance; the
+  authoritative chain/indexer state is re-read before a transfer is marked
+  reconciled.
+
+### Compatibility and Rollback
+
+- Changes are additive: no existing contract signature, storage layout, or API
+  consumer is altered.
+- Reconciliation state is derived from authoritative sources and can be
+  recomputed, so rollback is a matter of disabling the reconciliation job
+  without migrating persisted data.
+
+### Observability
+
+- Structured errors are emitted for authorization failures, validation
+  failures, and dependency failures.
+- Metrics are recorded for transfers classified, reconciled, and rejected per
+  category.
+- Audit events record who classified or reconciled a transfer and when.
+
 ## Observability
 
 - Structured errors are emitted for budget violations and dependency failures.
@@ -98,4 +150,4 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Donation and unsolicited-transfer reconciliation has focused tests covering success, authorization failure, boundary values (empty references, non-positive amounts, unknown categories), bounded batch limits, retries, stale data, and dependency failure paths.
