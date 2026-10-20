@@ -23,6 +23,7 @@ import {
   rejectLoanDispute,
 } from '../controllers/adminDisputeController.js';
 import { getPendingGovernance } from '../controllers/adminGovernanceController.js';
+import { getContractVerificationStatus } from '../controllers/adminContractVerificationController.js';
 import { query } from '../db/connection.js';
 
 import { buildRejectLoanTx } from '../controllers/loanController.js';
@@ -116,6 +117,25 @@ router.post(
 );
 
 router.get('/governance/pending', requireJwtAuth, requireRoles('admin'), getPendingGovernance);
+
+/**
+ * @swagger
+ * /admin/contracts/verification-status:
+ *   get:
+ *     summary: Stellar explorer verification status for deployed contracts
+ *     tags: [Admin]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Aggregate verification stats and per-contract status
+ */
+router.get(
+  '/contracts/verification-status',
+  requireJwtAuth,
+  requireRoles('admin'),
+  getContractVerificationStatus,
+);
 
 const checkDefaultsBodySchema = z.object({
   loanIds: z

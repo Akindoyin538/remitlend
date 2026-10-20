@@ -1,57 +1,93 @@
 # Backend
 
-## Database migration rehearsal
+Node.js service for the lending platform. It exposes the REST API, runs database
+migrations, and hosts the scheduled jobs.
 
-Before every release, each migration must be rehearsed against a production-scale,
-sanitized dataset so that lock, disk, and execution-time limits are validated before
-they can cause downtime. The rehearsal is repeatable and its evidence is linked to the
-exact migration commit.
+## Supported toolchain
 
-### 1. Build the sanitized rehearsal dataset
+| Tool | Supported version |
+| --- | --- |
+| Node.js | 20.x LTS (18.x works, 22.x untested) |
+| npm | 10.x (ships with Node 20) |
+| PostgreSQL | 15.x or 16.x |
+| Docker | 24.x+ (only needed for the container workflow) |
 
-Generate a dataset that preserves production scale and key distribution while removing
-direct and indirect personal identifiers.
+If `node --version` reports anything older than 18, install Node 20 LTS before
+continuing. The scripts below assume `npm`; `yarn` and `pnpm` are not supported.
 
-- Preserve: row counts per table, primary/foreign key cardinality, index selectivity,
-  and the distribution of hot keys (e.g. tenant/account IDs).
-- Remove: names, emails, phone numbers, addresses, IPs, free-text notes, and any
-  indirect identifiers (quasi-identifiers such as birth date + postal code) that could
-  re-identify a person.
-- Replace identifiers with deterministic synthetic values so repeated rehearsals are
-  comparable and referential integrity is retained.
+## Clean-checkout quick start
 
-Record the dataset version and the sanitization ruleset used in the rehearsal report.
+These are the exact commands a fresh clone needs. They are executed on every
+pull request by `.github/workflows/verify-contributor-setup.yml`, so if a step
+here drifts from `package.json` the workflow fails and points at this section.
 
-### 2. Run the rehearsal and capture evidence
+```bash
+# 1. Install dependencies (uses the committed lockfile)
+npm ci
 
-Run the migration against the sanitized dataset and capture, per migration:
+# 2. Create your local environment file from the checked-in example
+cp .env.example .env
 
-- total runtime and per-statement runtime;
-- lock type and lock duration (including time spent waiting on locks);
-- resource use: peak disk, WAL/redo volume, memory, and connection count;
-- query plans (`EXPLAIN (ANALYZE, BUFFERS)`) for statements touching large tables.
+# 3. Run database migrations
+npm run migrate
 
-Where the database supports it, run concurrent reads and writes against the affected
-tables during the migration to observe contention and blocking behavior.
+# 4. Seed development data
+npm run seed
 
-### 3. Compare against thresholds
+# 5. Run the focused test suite
+npm test
+```
 
-Each rehearsal is checked against defined safe thresholds (runtime, lock duration,
-peak disk, and blocking). The CI/release workflow records the measured values and
-fails the release when a migration exceeds a threshold.
+Every script referenced above (`migrate`, `seed`, `test`) must exist in
+`package.json`. The verification workflow parses this file and fails with the
+section name and the missing script if one is renamed or removed.
 
-### 4. Online / expand-contract plan for unsafe migrations
+## Environment variables
 
-A migration that exceeds a safe threshold must not ship as-is. It requires an approved
-online or expand-contract plan (additive schema change, backfill in batches, dual-write
-or compatibility window, then contract) reviewed and signed off before release.
+Copy `.env.example` to `.env` and fill in local values. The verification
+workflow checks that every variable documented here also appears in
+`.env.example`, so add new variables to both places.
 
-### 5. Release checklist
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | PostgreSQL connection string, e.g. `postgres://user:pass@localhost:5432/lending` |
+| `PORT` | no | HTTP port, defaults to `3000` |
+| `NODE_ENV` | no | `development`, `test`, or `production` |
+| `JWT_SECRET` | yes | Signing key for session tokens; use any local-only value |
 
-- [ ] Sanitized rehearsal dataset built at production scale with identifiers removed.
-- [ ] Migration rehearsed; runtime, lock duration, and resource use recorded.
-- [ ] Concurrent read/write behavior observed where supported.
-- [ ] Measured values compared against thresholds; failures block the release.
-- [ ] Any threshold breach has an approved online/expand-contract plan.
-- [ ] Rollback or forward-fix procedure documented and tested.
-- [ ] Rehearsal evidence linked to the exact migration commit in the release notes.
+Never commit real credentials. The workflow only uses throwaway local values and
+performs no external or value-bearing transactions.
+
+## Container workflow
+
+```bash
+docker compose up --build
+```
+
+This starts PostgreSQL and the API together. Run the migration and seed steps
+from inside the API container if you use this path instead of a local database.
+
+## Troubleshooting
+
+**`npm ci` fails with `EUSAGE` or lockfile errors.**
+Your `package-lock.json` is out of sync or you are on the wrong Node version.
+Run `node --version` and confirm 20.x, then `git checkout package-lock.json` and
+retry. Do not run `npm install` to "fix" it — that rewrites the lockfile.
+
+**`npm run migrate` cannot reach the database.**
+PostgreSQL is not running or `DATABASE_URL` is wrong. Start it with
+`docker compose up -d db`, then verify the host/port in `.env` match the
+container. On macOS with Homebrew, `brew services start postgresql@16`.
+
+**`npm run seed` fails with duplicate key errors.**
+The database already contains seeded rows. Reset it with
+`npm run migrate:reset` (development only) and run `npm run seed` again.
+
+**`npm test` fails on a fresh checkout but passes locally.**
+You likely have stale build output or a dirty `.env`. Remove `node_modules` and
+`.env`, then repeat the quick start from step 1. Tests must pass without any
+network access or external services.
+
+**A documented command no longer exists.**
+The verification workflow reports the file, section, and missing script. Update
+this README and `package.json` together in the same pull request.
