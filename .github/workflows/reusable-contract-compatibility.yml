@@ -13,6 +13,25 @@ name: Contract Compatibility (reusable)
 
 on:
   workflow_call:
+    inputs:
+      stage:
+        description: >-
+          Rollout stage to gate. "canary" runs the synthetic journeys against
+          the isolated staging environment; "promote" re-validates before
+          promotion. Leave empty for the plain compatibility suite.
+        required: false
+        type: string
+        default: ""
+      canary_traffic_percent:
+        description: Bounded share of traffic routed to the canary (1-50).
+        required: false
+        type: number
+        default: 10
+      base_url:
+        description: Base URL of the candidate (staging/canary) environment.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read

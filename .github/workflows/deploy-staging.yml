@@ -113,6 +113,9 @@ jobs:
   build-and-push:
     needs: verify-contracts-reproducible
     runs-on: ubuntu-latest
+    outputs:
+      backend-digest: ${{ steps.push-backend.outputs.digest }}
+      frontend-digest: ${{ steps.push-frontend.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -142,6 +145,7 @@ jobs:
           done
 
       - name: Build and push backend
+        id: push-backend
         uses: docker/build-push-action@v7
         with:
           context: ./backend
@@ -155,6 +159,7 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
 
       - name: Build and push frontend
+        id: push-frontend
         uses: docker/build-push-action@v7
         with:
           context: ./frontend
@@ -416,6 +421,135 @@ jobs:
 
   deploy:
     needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      canary-ok: ${{ steps.synthetic.outputs.ok }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Start canary backend in isolated staging
+        run: |
+          set -e
+          REPO=ghcr.io/${{ env.OWNER_LC }}/remitlend-backend
+          docker pull "${REPO}:staging-${{ github.sha }}"
+          docker run -d --name remitlend-canary -p 3001:3001 \
+            -e NODE_ENV=production \
+            -e SYNTHETIC_JOURNEYS=1 \
+            "${REPO}:staging-${{ github.sha }}"
+          echo "Waiting for canary /health..."
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then break; fi
+            sleep 3
+          done
+
+      - name: Contract/API compatibility gate
+        id: compat
+        run: |
+          set -e
+          echo "Checking contract/API compatibility for canary..."
+          # Fail the gate if the canary cannot serve the contract metadata the
+          # frontend depends on. A mismatch blocks promotion.
+          if ! curl -fsS http://localhost:3001/api/contracts/metadata >/dev/null 2>&1; then
+            echo "::error::contract/API compatibility check failed - blocking promotion"
+            exit 1
+          fi
+          echo "Contract/API compatibility OK."
+
+      - name: Run synthetic financial journeys (read, preview, tx-status)
+        id: synthetic
+        run: |
+          set -e
+          echo "Running synthetic journeys against canary (no production funds, no real identities)..."
+          # Read flow: list pools with synthetic fixtures.
+          curl -fsS http://localhost:3001/api/pools >/dev/null
+          # Preview flow: quote a synthetic borrow without submitting.
+          curl -fsS -X POST http://localhost:3001/api/loans/preview \
+            -H 'content-type: application/json' \
+            -d '{"amount":"100","asset":"SYNTH","synthetic":true}' >/dev/null
+          # Transaction-status flow: poll a synthetic tx id (never broadcast).
+          curl -fsS http://localhost:3001/api/transactions/synthetic-status >/dev/null
+          echo "ok=true" >> $GITHUB_OUTPUT
+          echo "Synthetic journeys passed."
+
+      - name: Stop canary
+        if: always()
+        run: docker rm -f remitlend-canary >/dev/null 2>&1 || true
+
+  # Promotion gate: only runs when the canary synthetic journeys and the
+  # contract/API compatibility check both pass. Contract deployment approvals
+  # remain separately controlled and are not triggered here.
+  promote:
+    needs: [build-and-push, canary]
+    if: ${{ needs.canary.outputs.canary-ok == 'true' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Record deployment evidence
+        run: |
+          set -e
+          mkdir -p deploy/evidence
+          cat > deploy/evidence/staging-${{ github.sha }}.json <<EOF
+          {
+            "commit": "${{ github.sha }}",
+            "backend_image_digest": "${{ needs.build-and-push.outputs.backend-digest }}",
+            "frontend_image_digest": "${{ needs.build-and-push.outputs.frontend-digest }}",
+            "config_version": "${{ vars.STAGING_CONFIG_VERSION }}",
+            "gates": {
+              "contract_api_compatibility": "passed",
+              "synthetic_journeys": "passed"
+            }
+          }
+          EOF
+          cat deploy/evidence/staging-${{ github.sha }}.json
+
+      - name: Promote canary to staging-latest
+        run: |
+          set -e
+          for img in backend frontend; do
+            REPO=ghcr.io/${{ env.OWNER_LC }}/remitlend-${img}
+            docker pull "${REPO}:staging-${{ github.sha }}"
+            docker tag "${REPO}:staging-${{ github.sha }}" "${REPO}:staging-latest"
+            docker push "${REPO}:staging-latest"
+          done
+          echo "Promoted staging-${{ github.sha }} to staging-latest."
+
+  # Rollback path: restores the previous image without resubmitting pending
+  # chain transactions. Database migrations are forward-compatible, so the
+  # previous image can run against the current schema.
+  rollback:
+    needs: [build-and-push, canary]
+    if: ${{ failure() && needs.canary.result == 'failure' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Roll back to staging-previous
+        run: |
+          set -e
+          for img in backend frontend; do
+            REPO=ghcr.io/${{ env.OWNER_LC }}/remitlend-${img}
+            if docker pull "${REPO}:staging-previous"; then
+              docker tag "${REPO}:staging-previous" "${REPO}:staging-latest"
+              docker push "${REPO}:staging-latest"
+            fi
+          done
+          echo "::warning::Rolled back to staging-previous. Pending chain transactions were not resubmitted."
+
+  deploy:
+    needs: [build-and-push, promote]
     if: ${{ vars.STAGING_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment: staging
