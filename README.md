@@ -244,8 +244,5 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 <!-- handsoff-issue-340 -->
 - #340: frontend: add deterministic wallet and RPC test doubles
 
-<!-- handsoff-issue-539 -->
-- #539: frontend: model loan application as a resumable, validated state machine
-
-<!-- handsoff-issue-542 -->
-- #542: wallet: block signing when the active network or contract set is unsupported
+<!-- handsoff-issue-535 -->
+- #535: contracts: make pool rate changes continuous and non-retroactive
