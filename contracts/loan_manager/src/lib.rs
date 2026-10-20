@@ -2600,6 +2600,12 @@ impl LoanManager {
             .ok_or(LoanError::LoanNotFound)?;
         Self::bump_persistent_ttl(&env, &loan_key);
 
+        // Idempotent under keeper retries: an already-defaulted loan is a no-op,
+        // so a retried tx after an ambiguous failure does not surface as an error.
+        if loan.status == LoanStatus::Defaulted {
+            return Ok(());
+        }
+
         if loan.status != LoanStatus::Approved {
             return Err(LoanError::LoanNotActive);
         }

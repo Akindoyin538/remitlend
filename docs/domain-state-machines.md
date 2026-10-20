@@ -97,7 +97,7 @@ stateDiagram-v2
 | `Pending → Rejected` | `reject_loan` | `admin.require_auth()` | Reason stored, `LoanRejected` emitted | Reverts: stays `Pending` |
 | `Pending → Cancelled` | `cancel_loan` | `borrower.require_auth()` | `LoanCancelled` emitted | Reverts: stays `Pending` |
 | `Approved → Repaid` | `repay` (full) | `borrower.require_auth()` | Cross-contract score update, `LoanRepaid` emitted | Reverts: prior repayments preserved, stays `Approved` |
-| `Approved → Defaulted` | `check_defaults` | permissionless after due date | `LoanDefaulted` emitted, score penalty applied | Reverts: stays `Approved` until a successful call |
+| `Approved → Defaulted` | `check_defaults` | permissionless after due date | `LoanDefaulted` emitted, score penalty applied | Reverts: stays `Approved` until a successful call. Idempotent: `check_default` on an already-`Defaulted` loan returns `Ok` with no side effects (keeper retries) |
 | `Defaulted → Liquidated` | `liquidate` | `admin.require_auth()` | Collateral seized, `CollateralLiquidated` emitted | Reverts: stays `Defaulted` |
 
 > Partial repayments leave the loan in `Approved`. Only a repayment that clears
