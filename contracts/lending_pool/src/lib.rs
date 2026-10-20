@@ -620,7 +620,7 @@ impl LendingPool {
         token: &Address,
         shares: i128,
         min_assets_out: i128,
-    ) -> Result<(), PoolError> {
+    ) -> Result<i128, PoolError> {
         if shares <= 0 {
             return Err(PoolError::InvalidAmount);
         }
@@ -713,7 +713,7 @@ impl LendingPool {
             assets_to_return,
             shares,
         );
-        Ok(())
+        Ok(assets_to_return)
     }
 
     // ── Admin / lifecycle ─────────────────────────────────────────────────
@@ -1325,11 +1325,16 @@ impl LendingPool {
         Self::assert_not_paused(&env)?;
         Self::assert_withdrawals_not_paused(&env)?;
         Self::assert_withdrawal_cooldown_elapsed(&env, &provider, &token);
-        Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)
+        Self::redeem_shares(&env, &provider, &token, shares, min_assets_out).map(|_| ())
     }
 
     /// Same as `withdraw` but bypasses the pause flag and cooldown. Still
     /// enforces `min_assets_out`.
+    ///
+    /// Emits an `EmergencySolvencyProof` event with the live idle balance
+    /// before and after the payout and the post-payout managed assets, so
+    /// off-chain monitors can verify the pool stayed solvent on every
+    /// emergency exit.
     pub fn emergency_withdraw(
         env: Env,
         provider: Address,
@@ -1338,7 +1343,22 @@ impl LendingPool {
         min_assets_out: i128,
     ) -> Result<(), PoolError> {
         provider.require_auth();
-        Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)
+        let idle_before = Self::read_pool_balance(&env, &token);
+        let assets_paid = Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)?;
+        let idle_after = Self::read_pool_balance(&env, &token);
+        let managed_after = Self::total_managed_assets(&env, &token);
+        // Solvency invariant: the payout was drawn from idle liquidity and
+        // neither the live balance nor the tracked assets went negative.
+        if idle_after < 0 || managed_after < 0 || idle_before - idle_after != assets_paid {
+            return Err(PoolError::InsufficientLiquidity);
+        }
+        emergency_solvency_proof(
+            &env,
+            provider,
+            token,
+            (assets_paid, idle_before, idle_after, managed_after),
+        );
+        Ok(())
     }
 
     // ── Cooldown views ────────────────────────────────────────────────────
