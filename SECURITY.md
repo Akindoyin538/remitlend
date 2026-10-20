@@ -8,6 +8,12 @@ For what our security posture explicitly relies on — and what it deliberately
 does not cover (assumptions, accepted risks, compensating controls, review
 cadence) — see [docs/SECURITY-ASSUMPTIONS.md](docs/SECURITY-ASSUMPTIONS.md).
 
+For the outbound egress allowlist — approved destination classes per service
+(API, worker, webhook, telemetry, build), the production network policy that
+denies unlisted destinations, the CI check that flags new outbound clients, and
+the policy-drift steps for incident response — see
+[docs/EGRESS-POLICY.md](docs/EGRESS-POLICY.md).
+
 
 ## Supported Versions
 
@@ -44,47 +50,52 @@ If you believe you have found a security vulnerability, please reach out to us v
 *   We request a **90-day disclosure window** to give us time to investigate and patch the vulnerability before it is publicly disclosed.
 *   At this time, we do not offer a paid bounty program, but we appreciate and may acknowledge responsible disclosures.
 
-## Contracts: Per-Borrower Exposure Limits
+## Donation and Unsolicited-Transfer Reconciliation
 
-Borrower exposure is bounded by an explicit, per-borrower limit enforced at the
-contracts boundary. The limit is a hard cap on the total outstanding principal a
-single borrower may hold across all supported assets; it is checked on every
-borrow and re-checked on any operation that increases exposure.
+Contracts may receive value that was not initiated through a tracked
+application flow (direct transfers, donations, or airdropped tokens). These
+inflows are treated as **untrusted** until explicitly classified and
+reconciled by an authorized operator.
 
 ### Authorization
 
-*   Only the configured risk authority (owner/admin role) may set or raise a
-    borrower's limit. Lowering a limit is permitted for the same authority and
-    takes effect immediately for new borrows.
-*   Borrowers cannot raise their own limit; attempts revert with a structured
-    `ExposureLimitUnauthorized` error.
+*   Only accounts holding the reconciliation role (see
+    [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)) may classify or
+    reconcile an unsolicited transfer.
+*   Unauthorized callers must fail closed with an explicit authorization
+    error; no state is mutated and no funds are moved.
+*   Classification and reconciliation are separate, auditable actions.
 
-### Failure and boundary behavior
+### Validation and resource bounds
 
-*   A borrow that would push total exposure above the borrower's limit reverts
-    with `ExposureLimitExceeded(borrower, current, requested, limit)`.
-*   A borrow that lands exactly on the limit succeeds; one unit above reverts.
-*   Limits are stored per borrower and default to zero, so an unconfigured
-    borrower cannot borrow until a limit is explicitly granted.
+*   Transfer references, amounts, and classification values are validated
+    before any state change; malformed or out-of-range inputs are rejected.
+*   Reconciliation is processed in bounded batches with an explicit maximum
+    iteration count to prevent unbounded gas/resource consumption.
+*   Amounts are derived from authoritative on-chain state, never from
+    caller-supplied totals.
 
-### Retry, migration, and rollback
+### Compatibility
 
-*   Limit checks are pure and idempotent: a reverted borrow leaves no state
-    change, so callers may safely retry after a limit adjustment.
-*   Existing borrowers are migrated with a limit derived from their current
-    outstanding exposure, preserving compatibility with deployed state.
-*   Rollback is a limit update; no funds move and no persisted balances are
-    rewritten.
+*   Reconciliation controls are additive: no existing function signatures or
+    storage layouts are changed, preserving compatibility with deployed
+    contracts and persisted data.
 
 ### Observability
 
-*   Every limit change emits `ExposureLimitUpdated(borrower, previous, next)`.
-*   Every rejected borrow emits `ExposureLimitRejected(borrower, current, requested, limit)`
-    for off-chain monitoring and alerting.
+*   Classification and reconciliation emit structured events (actor,
+    transfer reference, amount, classification, outcome) for audit and
+    operational diagnostics.
+*   Failure paths (authorization, validation, dependency failure) emit
+    distinct structured errors to support retries and alerting.
 
-### Verification
+### Threat model notes
 
-*   Focused contract tests cover success, authorization failure, exact-boundary,
-    over-boundary, retry-after-adjustment, and stale-limit paths.
-*   Integration coverage exercises the full borrow workflow against the enforced
-    limit.
+*   An attacker may attempt to spoof a donation to influence accounting or
+    inflate reported balances. Mitigation: unsolicited inflows are quarantined
+    as unclassified and excluded from authoritative balances until reconciled.
+*   An attacker may attempt to grief reconciliation by flooding unsolicited
+    transfers. Mitigation: bounded batch sizes and iteration limits cap the
+    work per reconciliation call.
+*   An unauthorized caller may attempt to reclassify transfers. Mitigation:
+    role-gated authorization with fail-closed behavior and audit events.

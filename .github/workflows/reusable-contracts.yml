@@ -1,4 +1,5 @@
 # Issue #409 – Reusable workflow: Soroban smart-contract checks
+# Issue #537 – Reproducible optimized WASM builds gated by a release manifest.
 # Least-privilege: read-only checkout; artifacts uploaded for inspection.
 name: Contracts CI (reusable)
 
@@ -8,13 +9,26 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pinned toolchain inputs (see contracts/REPRODUCIBLE_BUILDS.md).
+  # Bump these only via an intentional compiler upgrade that re-establishes
+  # the release manifest baseline.
+  RUST_TOOLCHAIN: "1.79.0"
+  WASM_TARGET: "wasm32-unknown-unknown"
+  STELLAR_CLI_VERSION: "21.0.0"
+  SOROBAN_OPTIMIZER_VERSION: "21.0.0"
+  RELEASE_MANIFEST: "contracts/release-manifest.json"
+
 jobs:
   contracts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.WASM_TARGET }}
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -30,6 +44,9 @@ jobs:
       - name: Run tests
         run: cargo test -- --test-threads=1
         working-directory: contracts
+      - name: NFT metadata integrity commitment tests
+        run: cargo test -p nft metadata_integrity -- --test-threads=1 --nocapture
+        working-directory: contracts
       - name: Formal verification (loan_manager invariants)
         run: cargo test -p loan_manager formal_verification -- --test-threads=1 --nocapture
         working-directory: contracts
@@ -39,10 +56,10 @@ jobs:
       - name: Build contracts for wasm32 and enforce size budget
         run: |
           set -euo pipefail
-          cargo build --target wasm32-unknown-unknown --release
+          cargo build --target "$WASM_TARGET" --release
           max_bytes=$((256 * 1024))
           shopt -s nullglob
-          wasm_files=(target/wasm32-unknown-unknown/release/*.wasm)
+          wasm_files=(target/"$WASM_TARGET"/release/*.wasm)
           if [ "${#wasm_files[@]}" -eq 0 ]; then
             echo "::error::No wasm artifacts were produced."
             exit 1
@@ -58,12 +75,12 @@ jobs:
           done
         working-directory: contracts
       - name: Analyze per-function contract sizes
-        run: bash ../scripts/analyze-contract-sizes.sh ./target/wasm32-unknown-unknown/release
+        run: bash ../scripts/analyze-contract-sizes.sh ./target/"$WASM_TARGET"/release
         working-directory: contracts
       - name: Check for size regressions
         if: github.event_name == 'pull_request'
         run: |
-          bash ../scripts/check-wasm-size-regression.sh origin/main ./target/wasm32-unknown-unknown/release || exit_code=$?
+          bash ../scripts/check-wasm-size-regression.sh origin/main ./target/"$WASM_TARGET"/release || exit_code=$?
           if [ "${exit_code:-0}" -ne 0 ]; then
             echo "::warning::Size regression detected."
             exit 1
@@ -71,7 +88,7 @@ jobs:
         working-directory: contracts
         continue-on-error: true
       - name: Generate optimization report
-        run: bash ../scripts/optimize-wasm-sizes.sh ./target/wasm32-unknown-unknown/release ./.wasm-optimized
+        run: bash ../scripts/optimize-wasm-sizes.sh ./target/"$WASM_TARGET"/release ./.wasm-optimized
         working-directory: contracts
         continue-on-error: true
       - name: Upload size analysis and optimization report
@@ -87,7 +104,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: contracts-wasm
-          path: contracts/target/wasm32-unknown-unknown/release/*.wasm
+          path: contracts/target/${{ env.WASM_TARGET }}/release/*.wasm
           if-no-files-found: error
       - name: Install tarpaulin
         uses: taiki-e/install-action@v2
@@ -105,3 +122,84 @@ jobs:
       - name: Check fuzz targets compile
         run: cargo check
         working-directory: contracts/fuzz
+
+  # Issue #537 – Reproducibility verification runs as its own job so that
+  # reproducibility failures are reported separately from contract test
+  # failures. It rebuilds the optimized WASM from a clean checkout with the
+  # pinned toolchain and compares digests against the approved release
+  # manifest. Deployment must consume this job's result.
+  reproducibility:
+    runs-on: ubuntu-latest
+    needs: contracts
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.WASM_TARGET }}
+      - name: Install pinned Stellar CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin stellar
+          stellar --version
+      - name: Build optimized WASM (pinned optimizer)
+        run: |
+          set -euo pipefail
+          cargo build --target "$WASM_TARGET" --release
+          mkdir -p .wasm-optimized
+          shopt -s nullglob
+          for wasm in target/"$WASM_TARGET"/release/*.wasm; do
+            name=$(basename "$wasm")
+            stellar contract optimize \
+              --wasm "$wasm" \
+              --wasm-out ".wasm-optimized/$name"
+          done
+        working-directory: contracts
+      - name: Verify optimized WASM digests against release manifest
+        run: |
+          set -euo pipefail
+          manifest="$RELEASE_MANIFEST"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::Release manifest $manifest is missing; refusing to proceed."
+            exit 1
+          fi
+          # Record the source commit and toolchain inputs used for this build.
+          commit=$(git rev-parse HEAD)
+          echo "Source commit: $commit"
+          echo "Rust: $RUST_TOOLCHAIN | target: $WASM_TARGET | stellar-cli: $STELLAR_CLI_VERSION | optimizer: $SOROBAN_OPTIMIZER_VERSION"
+          shopt -s nullglob
+          artifacts=(.wasm-optimized/*.wasm)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "::error::No optimized WASM artifacts were produced."
+            exit 1
+          fi
+          failed=0
+          for wasm in "${artifacts[@]}"; do
+            name=$(basename "$wasm")
+            actual=$(sha256sum "$wasm" | awk '{print $1}')
+            expected=$(jq -r --arg n "$name" '.artifacts[$n].sha256 // empty' "$manifest")
+            if [ -z "$expected" ]; then
+              echo "::error file=$wasm::Digest for $name is absent from the approved release manifest."
+              failed=1
+              continue
+            fi
+            if [ "$actual" != "$expected" ]; then
+              echo "::error file=$wasm::Digest mismatch for $name (expected $expected, got $actual)."
+              failed=1
+              continue
+            fi
+            echo "$name: digest matches approved manifest ($actual)"
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::Reproducibility verification failed; deployment is blocked."
+            exit 1
+          fi
+        working-directory: contracts
+      - name: Upload optimized wasm artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: contracts-wasm-optimized
+          path: contracts/.wasm-optimized/*.wasm
+          if-no-files-found: error

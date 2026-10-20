@@ -748,7 +748,7 @@ export class EventIndexer {
       // Handle NftTransferred events — store in transfer history table
       for (const event of parsedEvents) {
         if (
-          event.eventType === 'NftTransferred' &&
+          event.eventType === 'NFTTransferred' &&
           (event as any).nftTransferFrom &&
           (event as any).nftTransferTo
         ) {
@@ -898,7 +898,7 @@ export class EventIndexer {
       if (event.topic[2]) {
         address = this.decodeAddress(event.topic[2]);
       }
-    } else if (type === 'NftTransferred') {
+    } else if (type === 'NFTTransferred') {
       // Decode structured NftTransferEvent { from, to, score, ledger }
       try {
         const data = scValToNative(event.value);
