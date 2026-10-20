@@ -1,3 +1,4 @@
+use crate::RiskParam;
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
 
 pub fn loan_requested(env: &Env, loan_id: u32, borrower: Address, amount: i128) {
@@ -188,6 +189,21 @@ pub fn min_rate_bps_updated(env: &Env, admin: Address, old_rate: u32, new_rate: 
 pub fn max_rate_bps_updated(env: &Env, admin: Address, old_rate: u32, new_rate: u32) {
     let topics = (Symbol::new(env, "MaxRateBpsUpdated"), admin);
     env.events().publish(topics, (old_rate, new_rate));
+}
+
+pub fn risk_change_proposed(env: &Env, param: RiskParam, new_value: u32, eta_ledger: u32) {
+    let topics = (Symbol::new(env, "RiskChangeProposed"), param);
+    env.events().publish(topics, (new_value, eta_ledger));
+}
+
+pub fn risk_change_executed(env: &Env, param: RiskParam, old_value: u32, new_value: u32) {
+    let topics = (Symbol::new(env, "RiskChangeExecuted"), param);
+    env.events().publish(topics, (old_value, new_value));
+}
+
+pub fn risk_change_cancelled(env: &Env, param: RiskParam, cancelled_value: u32) {
+    let topics = (Symbol::new(env, "RiskChangeCancelled"), param);
+    env.events().publish(topics, cancelled_value);
 }
 
 pub fn loan_purged(env: &Env, loan_id: u32) {

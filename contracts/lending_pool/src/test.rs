@@ -1972,3 +1972,367 @@ fn test_round_trip_deposit_then_redeem_is_never_profitable() {
         pool_client.withdraw(&provider, &token_id, &shares, &0);
     }
 }
+
+
+// ── Bounded Yield Distribution Authorization Tests ──────────────────────────
+
+#[test]
+fn test_bounded_yield_admin_authorization() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    // Admin can always distribute yield without limits
+    stellar_asset_client.mint(&admin, &100);
+    let result = pool_client.distribute_yield(&admin, &token_id, &100);
+    assert!(result.is_ok());
+    assert_eq!(pool_client.get_total_yield_distributed(&token_id), 100);
+}
+
+#[test]
+fn test_bounded_yield_unauthorized_distributor() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let unauthorized = Address::generate(&env);
+    stellar_asset_client.mint(&unauthorized, &100);
+
+    // Unauthorized distributor cannot distribute yield
+    let result = pool_client.distribute_yield(&unauthorized, &token_id, &100);
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err(),
+        PoolError::YieldDistributorNotAuthorized
+    );
+}
+
+#[test]
+fn test_bounded_yield_authorize_distributor() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+
+    // Authorize distributor
+    let auth_result = pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    assert!(auth_result.is_ok());
+
+    // Verify authorized
+    let distributors = pool_client.get_authorized_distributors(&token_id);
+    assert_eq!(distributors.len(), 1);
+    assert_eq!(distributors.get(0).unwrap(), distributor);
+
+    // Now distributor can distribute yield
+    stellar_asset_client.mint(&distributor, &50);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &50);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_bounded_yield_revoke_distributor() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+
+    // Authorize and then revoke
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    let revoke_result = pool_client.revoke_yield_distributor(&admin, &token_id, &distributor);
+    assert!(revoke_result.is_ok());
+
+    // Verify revoked
+    let distributors = pool_client.get_authorized_distributors(&token_id);
+    assert_eq!(distributors.len(), 0);
+
+    // Distributor can no longer distribute
+    stellar_asset_client.mint(&distributor, &50);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &50);
+    assert_eq!(
+        result.unwrap_err(),
+        PoolError::YieldDistributorNotAuthorized
+    );
+}
+
+#[test]
+fn test_bounded_yield_per_distribution_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+
+    // Authorize distributor and set per-distribution limit
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    pool_client.set_per_distribution_yield_limit(&admin, &token_id, &100);
+
+    // Distribution within limit succeeds
+    stellar_asset_client.mint(&distributor, &100);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &100);
+    assert!(result.is_ok());
+
+    // Distribution exceeding limit fails
+    stellar_asset_client.mint(&distributor, &50);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &150);
+    assert_eq!(
+        result.unwrap_err(),
+        PoolError::YieldExceedsPerDistributionLimit
+    );
+
+    // Admin bypasses per-distribution limit
+    stellar_asset_client.mint(&admin, &200);
+    let result = pool_client.distribute_yield(&admin, &token_id, &200);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_bounded_yield_cumulative_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+
+    // Setup: authorize distributor, set cumulative limit
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    pool_client.set_cumulative_yield_limit(&admin, &token_id, &500);
+
+    // First distribution within cumulative limit succeeds
+    stellar_asset_client.mint(&distributor, &300);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &300);
+    assert!(result.is_ok());
+
+    // Second distribution that stays within cumulative limit succeeds
+    stellar_asset_client.mint(&distributor, &150);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &150);
+    assert!(result.is_ok());
+
+    // Third distribution exceeding cumulative limit fails
+    stellar_asset_client.mint(&distributor, &100);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &100);
+    assert_eq!(
+        result.unwrap_err(),
+        PoolError::YieldExceedsCumulativeLimit
+    );
+
+    // Verify cumulative usage tracked
+    let used = pool_client.get_distributor_yield_used(&distributor, &token_id);
+    assert_eq!(used, 450); // 300 + 150
+}
+
+#[test]
+fn test_bounded_yield_period_reset() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, _token_client) = create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+
+    // Setup: authorize, set cumulative limit and period
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    pool_client.set_cumulative_yield_limit(&admin, &token_id, &500);
+    pool_client.set_yield_distribution_period(&admin, &token_id, &10); // 10 ledger period
+
+    // Distribute at ledger 0
+    stellar_asset_client.mint(&distributor, &500);
+    pool_client.distribute_yield(&distributor, &token_id, &500);
+    let used_at_0 = pool_client.get_distributor_yield_used(&distributor, &token_id);
+    assert_eq!(used_at_0, 500);
+
+    // Try to distribute more at ledger 0 — fails (cumulative limit)
+    stellar_asset_client.mint(&distributor, &100);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &100);
+    assert_eq!(
+        result.unwrap_err(),
+        PoolError::YieldExceedsCumulativeLimit
+    );
+
+    // Advance ledger past period (> 10 ledgers)
+    env.ledger().with_sequence(15);
+
+    // Now can distribute again (period reset)
+    stellar_asset_client.mint(&distributor, &300);
+    let result = pool_client.distribute_yield(&distributor, &token_id, &300);
+    assert!(result.is_ok());
+
+    let used_at_15 = pool_client.get_distributor_yield_used(&distributor, &token_id);
+    assert_eq!(used_at_15, 300); // Reset, not accumulated
+}
+
+#[test]
+fn test_bounded_yield_query_limits() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _stellar_asset_client, _token_client) =
+        create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    // Default: no limits
+    let (per_dist, cumul, period) = pool_client.get_yield_limits(&token_id);
+    assert_eq!(per_dist, 0);
+    assert_eq!(cumul, 0);
+    assert_eq!(period, 0);
+
+    // Set limits
+    pool_client.set_per_distribution_yield_limit(&admin, &token_id, &1000);
+    pool_client.set_cumulative_yield_limit(&admin, &token_id, &10000);
+    pool_client.set_yield_distribution_period(&admin, &token_id, &100);
+
+    // Query updated limits
+    let (per_dist, cumul, period) = pool_client.get_yield_limits(&token_id);
+    assert_eq!(per_dist, 1000);
+    assert_eq!(cumul, 10000);
+    assert_eq!(period, 100);
+}
+
+#[test]
+fn test_bounded_yield_authorize_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _stellar_asset_client, _token_client) =
+        create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+
+    // Authorize twice
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+
+    // Should still have only one entry
+    let distributors = pool_client.get_authorized_distributors(&token_id);
+    assert_eq!(distributors.len(), 1);
+}
+
+#[test]
+fn test_bounded_yield_non_admin_cannot_authorize() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _stellar_asset_client, _token_client) =
+        create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let non_admin = Address::generate(&env);
+    let distributor = Address::generate(&env);
+
+    // Non-admin cannot authorize
+    let result = pool_client.authorize_yield_distributor(&non_admin, &token_id, &distributor);
+    assert_eq!(result.unwrap_err(), PoolError::UnauthorizedYieldPath);
+}
+
+#[test]
+fn test_bounded_yield_with_deposits_and_withdrawals() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, stellar_asset_client, token_client) =
+        create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+    pool_client.set_withdrawal_cooldown(&0);
+
+    let provider = Address::generate(&env);
+    let distributor = Address::generate(&env);
+
+    // Provider deposits
+    stellar_asset_client.mint(&provider, &1000);
+    pool_client.deposit(&provider, &token_id, &1000, &0);
+    assert_eq!(pool_client.get_shares(&provider, &token_id), 1000);
+
+    // Authorize and distribute yield
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+    stellar_asset_client.mint(&distributor, &100);
+    pool_client.distribute_yield(&distributor, &token_id, &100);
+
+    // Provider withdraws and gets share of yield
+    pool_client.withdraw(&provider, &token_id, &1000, &0);
+    // With virtual offset: 1000 * (1100 + 1000) / (1000 + 1000) = 1050 (rounded down)
+    assert_eq!(token_client.balance(&provider), 1050);
+}
+
+#[test]
+fn test_bounded_yield_zero_amount_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let (token_id, _stellar_asset_client, _token_client) =
+        create_token_contract(&env, &admin);
+
+    let pool_id = env.register(LendingPool, ());
+    let pool_client = LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    let distributor = Address::generate(&env);
+    pool_client.authorize_yield_distributor(&admin, &token_id, &distributor);
+
+    // Zero distribution fails
+    let result = pool_client.distribute_yield(&distributor, &token_id, &0);
+    assert_eq!(result.unwrap_err(), PoolError::InvalidAmount);
+
+    // Negative distribution fails
+    let result = pool_client.distribute_yield(&distributor, &token_id, &-100);
+    assert_eq!(result.unwrap_err(), PoolError::InvalidAmount);
+}

@@ -3,6 +3,7 @@ import {
   getIndexerStatus,
   getBorrowerEvents,
   getLoanEvents,
+  getNftTransferHistory,
   getRecentEvents,
   listWebhookSubscriptions,
   createWebhookSubscription,
@@ -79,6 +80,51 @@ router.get(
   requireScopes('read:loans'),
   requireWalletOwnership,
   getBorrowerEvents,
+);
+
+/**
+ * @swagger
+ * /indexer/transfers/nft/{wallet}:
+ *   get:
+ *     summary: Get RemittanceNFT transfer history for a wallet
+ *     description: >
+ *       Returns NFT transfers where the wallet was either sender or recipient, newest first.
+ *       `wallet` must match the JWT Stellar public key.
+ *     tags: [Indexer]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: wallet
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Wallet's Stellar address
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *     responses:
+ *       200:
+ *         description: Transfers retrieved successfully
+ *       401:
+ *         description: Missing or invalid Bearer token
+ *       403:
+ *         description: wallet does not match authenticated wallet
+ */
+router.get(
+  '/transfers/nft/:wallet',
+  requireJwtAuth,
+  requireScopes('read:remittances'),
+  requireWalletOwnership,
+  getNftTransferHistory,
 );
 
 /**

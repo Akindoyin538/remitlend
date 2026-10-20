@@ -46,6 +46,7 @@ export const SUPPORTED_WEBHOOK_EVENT_TYPES = [
   'ScoreUpdated',
   'NFTSeized',
   'NFTBurned',
+  'NFTTransferred',
   'ProposalCreated',
   'ProposalApproved',
   'ProposalFinalized',
