@@ -29,6 +29,13 @@ services:
       start_period: 10s
 
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: always
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4318:4318" # OTLP/HTTP receiver
+
   backend:
     build:
       context: ./backend
@@ -41,6 +48,8 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@db:5432/remitlend
       - REDIS_URL=redis://redis:6379
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_SERVICE_NAME=remitlend-backend
       - PII_KEK_ID=${PII_KEK_ID:-default-kek}
       - PII_KMS_ENDPOINT=${PII_KMS_ENDPOINT:-}
       - PII_KEK_REGION=${PII_KEK_REGION:-}

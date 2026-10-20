@@ -46,6 +46,8 @@ pub enum MathError {
     /// A post-condition invariant (e.g. pro-rata parts summing to the
     /// total) failed to hold, indicating a drift between layers.
     DriftDetected = 3,
+    /// An operand was negative, or a result fell outside its allowed bounds.
+    OutOfRange = 4,
 }
 
 /// Divide `num` by `den`, applying `mode` to any remainder.
@@ -219,6 +221,42 @@ pub fn split_pro_rata(env: &Env, total: i128, weights: &Vec<i128>) -> Result<Vec
     }
 
     Ok(parts)
+}
+
+/// Multiply `a` by `b`, then divide by `den`, applying `mode` to any remainder.
+///
+/// The product is overflow-checked before rounding, so a wrapped intermediate
+/// can never reach settlement. Prefer this over a bare `a * b / den`.
+pub fn mul_div(a: i128, b: i128, den: i128, mode: RoundingMode) -> Result<i128, MathError> {
+    let prod = a.checked_mul(b).ok_or(MathError::Overflow)?;
+    round_div(prod, den, mode)
+}
+
+/// Add two non-negative stroop amounts, rejecting any sum above `max`.
+///
+/// Negative operands or a negative `max` are rejected outright so that bad
+/// input can never be credited to a balance.
+pub fn bounded_add(a: i128, b: i128, max: i128) -> Result<i128, MathError> {
+    if a < 0 || b < 0 || max < 0 {
+        return Err(MathError::OutOfRange);
+    }
+    let sum = a.checked_add(b).ok_or(MathError::Overflow)?;
+    if sum > max {
+        return Err(MathError::OutOfRange);
+    }
+    Ok(sum)
+}
+
+/// Subtract `b` from `a`, rejecting negative operands and any result below zero.
+pub fn bounded_sub(a: i128, b: i128) -> Result<i128, MathError> {
+    if a < 0 || b < 0 {
+        return Err(MathError::OutOfRange);
+    }
+    let diff = a.checked_sub(b).ok_or(MathError::Overflow)?;
+    if diff < 0 {
+        return Err(MathError::OutOfRange);
+    }
+    Ok(diff)
 }
 
 #[cfg(test)]
