@@ -1,5 +1,9 @@
 # Issue #407 – Deployed-contract compatibility suite
 # Issue #409 – Packaged as a least-privilege reusable workflow.
+# Issue #536 – Enforce cross-contract interface compatibility with
+#              versioned fixtures (function names, arg order/types,
+#              return shape, events, error codes) against the declared
+#              compatibility baseline. Deterministic; no mainnet creds.
 #
 # Validates that the env-var contract IDs are well-formed, present in
 # docs/deployed-contracts.md, and that the configured RPC is reachable.
@@ -38,3 +42,34 @@ jobs:
           LENDING_POOL_CONTRACT_ID: ${{ secrets.LENDING_POOL_CONTRACT_ID }}
           REMITTANCE_NFT_CONTRACT_ID: ${{ secrets.REMITTANCE_NFT_CONTRACT_ID }}
           MULTISIG_GOVERNANCE_CONTRACT_ID: ${{ secrets.MULTISIG_GOVERNANCE_CONTRACT_ID }}
+
+  interface-compatibility:
+    name: Cross-contract interface compatibility (versioned fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Compare current artifacts against compatibility baseline
+        # Deterministic, offline check: compares the current contract
+        # interface artifacts (function names, argument order/types,
+        # return shape, events, error codes) against the declared
+        # baseline in contracts/compatibility/. Breaking changes fail
+        # unless an explicit version bump is declared in the baseline.
+        # No mainnet credentials or network access are required.
+        run: node scripts/check-contract-interface-compat.mjs
+        env:
+          COMPAT_BASELINE_DIR: contracts/compatibility
+          COMPAT_ARTIFACTS_DIR: contracts/compatibility/current
+          COMPAT_REQUIRE_VERSION_BUMP: "true"
+      - name: Run end-to-end loan lifecycle against compatibility fixture
+        # Exercises a full loan lifecycle (origination -> repayment)
+        # using the versioned compatibility fixture so client/contract
+        # ABI drift is caught before merge.
+        run: node scripts/check-contract-interface-compat.mjs --lifecycle
+        env:
+          COMPAT_BASELINE_DIR: contracts/compatibility
+          COMPAT_ARTIFACTS_DIR: contracts/compatibility/current
+          COMPAT_REQUIRE_VERSION_BUMP: "true"
