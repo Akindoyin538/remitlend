@@ -44,6 +44,9 @@ jobs:
       - name: Run tests
         run: cargo test -- --test-threads=1
         working-directory: contracts
+      - name: NFT metadata integrity commitment tests
+        run: cargo test -p nft metadata_integrity -- --test-threads=1 --nocapture
+        working-directory: contracts
       - name: Formal verification (loan_manager invariants)
         run: cargo test -p loan_manager formal_verification -- --test-threads=1 --nocapture
         working-directory: contracts
