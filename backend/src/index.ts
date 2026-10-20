@@ -36,6 +36,10 @@ import {
 import { sorobanService } from './services/sorobanService.js';
 import { validateLoanConfigOnStartup } from './config/loanConfig.js';
 import { startLoanDueCheckCron, stopLoanDueCheckCron } from './cron/loanCheckCron.js';
+import {
+  startContractVerificationCron,
+  stopContractVerificationCron,
+} from './cron/contractVerificationJob.js';
 // Imported the score decay scheduler initialization wrapper
 import { startScoreDecayScheduler } from './cron/scoreDecayJob.js';
 import { initializePauseState } from './middleware/pauseGuard.js';
@@ -104,6 +108,9 @@ const server = app.listen(port, () => {
   // Start loan due check cron
   startLoanDueCheckCron();
 
+  // Start contract verification polling against Stellar explorer
+  startContractVerificationCron();
+
   // Wire up and activate the score decay daily scheduler loop
   scoreDecaySchedulerHandle = startScoreDecayScheduler() || null;
 });
@@ -130,6 +137,7 @@ const shutdown = async (signal: 'SIGTERM' | 'SIGINT') => {
     }
 
     stopLoanDueCheckCron();
+    stopContractVerificationCron();
     await stopIndexer();
     stopDefaultCheckerScheduler();
     stopWebhookRetryProcessor();

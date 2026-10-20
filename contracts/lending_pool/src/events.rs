@@ -76,7 +76,48 @@ pub fn price_updated(
         .publish(topics, (ledger_seq, total_managed_assets, total_shares));
 }
 
+/// Emitted by `emergency_withdraw` after a successful payout. `proof` is
+/// `(assets_paid, idle_before, idle_after, managed_after)`, read from the
+/// authoritative token balance and internal accounting.
+pub fn emergency_solvency_proof(
+    env: &Env,
+    provider: Address,
+    token: Address,
+    proof: (i128, i128, i128, i128),
+) {
+    let topics = (Symbol::new(env, "EmergencySolvencyProof"), provider, token);
+    env.events()
+        .publish(topics, (env.ledger().sequence(), proof));
+}
+
 pub fn pause_flags_updated(env: &Env, flags: crate::PauseFlags) {
     let topics = (Symbol::new(env, "PauseFlagsUpdated"),);
     env.events().publish(topics, flags.flags);
+}
+
+// ── Bounded yield authorization events ──────────────────────────────────
+
+pub fn yield_distributor_authorized(env: &Env, token: Address, distributor: Address) {
+    let topics = (Symbol::new(env, "YieldDistributorAuthorized"), token);
+    env.events().publish(topics, distributor);
+}
+
+pub fn yield_distributor_revoked(env: &Env, token: Address, distributor: Address) {
+    let topics = (Symbol::new(env, "YieldDistributorRevoked"), token);
+    env.events().publish(topics, distributor);
+}
+
+pub fn per_distribution_limit_updated(env: &Env, token: Address, limit: i128) {
+    let topics = (Symbol::new(env, "PerDistributionLimitUpdated"), token);
+    env.events().publish(topics, limit);
+}
+
+pub fn cumulative_yield_limit_updated(env: &Env, token: Address, limit: i128) {
+    let topics = (Symbol::new(env, "CumulativeYieldLimitUpdated"), token);
+    env.events().publish(topics, limit);
+}
+
+pub fn yield_distribution_period_updated(env: &Env, token: Address, period_ledgers: u32) {
+    let topics = (Symbol::new(env, "YieldDistributionPeriodUpdated"), token);
+    env.events().publish(topics, period_ledgers);
 }

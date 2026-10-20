@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { xdr } from '@stellar/stellar-sdk';
 import { query } from '../db/connection.js';
 import { EventIndexer, type SorobanRawEvent } from '../services/eventIndexer.js';
+import { transferHistoryService } from '../services/transferHistoryService.js';
 import {
   SUPPORTED_WEBHOOK_EVENT_TYPES,
   webhookService,
@@ -345,6 +346,49 @@ export const getBorrowerEvents = async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to get borrower events',
+    });
+  }
+};
+
+/**
+ * Get RemittanceNFT transfer history (incoming and outgoing) for a wallet
+ */
+export const getNftTransferHistory = async (req: Request, res: Response) => {
+  try {
+    const walletParam = req.params.wallet;
+    const wallet = Array.isArray(walletParam) ? walletParam[0] : walletParam;
+    if (!wallet) {
+      return res.status(400).json({
+        success: false,
+        message: 'Wallet is required',
+      });
+    }
+
+    const limit = parseCappedLimit(req);
+    const offsetParam = Number(req.query.offset);
+    const offset = Number.isInteger(offsetParam) && offsetParam > 0 ? offsetParam : 0;
+
+    const transfers = await transferHistoryService.getTransfersForAddress(wallet, {
+      limit,
+      offset,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        address: wallet,
+        items: transfers,
+      },
+      page: {
+        limit,
+        offset,
+      },
+    });
+  } catch (error) {
+    logger.withContext().error('Failed to get NFT transfer history', { error });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get NFT transfer history',
     });
   }
 };

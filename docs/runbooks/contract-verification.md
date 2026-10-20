@@ -17,6 +17,8 @@ When a contract is deployed:
 5. **Poll Stellar explorer** — confirm verification status
 6. **Update admin UI** — show verification progress
 
+> **Known gap:** steps 1–3 are not automated yet. `scripts/deploy.ts` does not insert into `contract_verification`, so new contracts must be registered with the manual SQL in "Manual Verification Flow" (Step 3). Until that is automated, the job and admin endpoint only cover contracts that have a record.
+
 ### Verification Record
 
 After deployment, the database contains:
@@ -37,7 +39,7 @@ updated_at          | 2024-01-15 10:30:00 UTC
 
 ## Admin UI Integration
 
-The admin dashboard displays verification status:
+The admin dashboard reads verification status from a JWT-protected admin endpoint (`requireRoles('admin')`):
 
 ```json
 GET /api/v1/admin/contracts/verification-status
@@ -49,15 +51,15 @@ GET /api/v1/admin/contracts/verification-status
   "verificationRate": 75,
   "contracts": [
     {
-      "id": "CA3D...",
-      "name": "LoanManager",
+      "contractId": "CA3D...",
+      "contractName": "LoanManager",
       "verified": true,
       "verifiedAt": "2024-01-15T10:35:00Z",
       "explorerUrl": "https://stellar.expert/explorer/testnet/contract/CA3D..."
     },
     {
-      "id": "CBXYZ...",
-      "name": "LendingPool",
+      "contractId": "CBXYZ...",
+      "contractName": "LendingPool",
       "verified": false,
       "verifiedAt": null,
       "explorerUrl": "https://stellar.expert/explorer/testnet/contract/CBXYZ..."
@@ -65,6 +67,8 @@ GET /api/v1/admin/contracts/verification-status
   ]
 }
 ```
+
+> **Status:** the endpoint is implemented (`backend/src/controllers/adminContractVerificationController.ts`). The frontend admin page that renders it is not yet built.
 
 ## Stellar Explorer Integration
 
@@ -130,15 +134,16 @@ id  | contract_id | success | message | attempted_at
 ### Health Check
 
 ```bash
-# Check verification stats
-curl http://localhost:3001/api/v1/admin/contracts/verification-stats \
+# Check verification stats (same endpoint as the admin UI)
+curl http://localhost:3001/api/v1/admin/contracts/verification-status \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 
 {
   "total": 4,
   "verified": 3,
   "pending": 1,
-  "verificationRate": 75
+  "verificationRate": 75,
+  "contracts": [...]
 }
 ```
 
@@ -315,33 +320,16 @@ WHERE contract_id = 'CA3D...';
 
 ## Automated Verification Job
 
-Background job (runs every hour):
+Implemented in `backend/src/cron/contractVerificationJob.ts`, started from `backend/src/index.ts`. It runs at minute 30 of every hour and:
 
-```typescript
-// src/cron/contractVerificationJob.ts
+1. Loads up to 10 unverified rows from `contract_verification` (oldest first).
+2. Calls `GET https://stellar.expert/api/v2/contract/{contractId}` and reads the `verified` flag.
+3. On `verified: true`, calls `markVerified` (which only matches the stored `source_code_hash`).
+4. Writes one row to `contract_verification_attempts` per check: success, "not yet verified", or the error message (HTTP status, timeout, network).
 
-async function verifyContractsJob() {
-  const unverified = await contractVerificationService.getUnverifiedContracts(10);
-  
-  for (const contract of unverified) {
-    try {
-      const isVerified = await checkStellarExplorerVerification(contract.contractId);
-      if (isVerified) {
-        await contractVerificationService.markVerified(
-          contract.contractId,
-          contract.sourceCodeHash
-        );
-      }
-    } catch (error) {
-      await contractVerificationService.recordVerificationAttempt(
-        contract.contractId,
-        false,
-        error.message
-      );
-    }
-  }
-}
-```
+The job skips a run if the previous one is still in flight. Its runs are reported through the job metrics service under `contractVerificationCron`.
+
+> **Known gap:** the `api/v2/contract` response shape is taken from the manual flow above and has not been checked against the live API. Confirm it on testnet before relying on the job's `verified: true` result.
 
 ## Deployment Checklist
 
