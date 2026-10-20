@@ -1,4 +1,5 @@
 import pg, { type PoolClient } from 'pg';
+import { recordDbQueryDuration } from '../middleware/metrics.js';
 import logger from '../utils/logger.js';
 
 export type { PoolClient };
@@ -138,6 +139,15 @@ export async function withTransaction<T>(
   }
 }
 
+const SLOW_QUERY_THRESHOLD_MS = 100;
+
+// Derive low-cardinality labels for the db_query_duration_seconds histogram
+const describeQuery = (text: string) => {
+  const operation = text.trimStart().split(/\s+/, 1)[0]?.toUpperCase() ?? 'UNKNOWN';
+  const table = text.match(/\b(?:FROM|INTO|UPDATE|JOIN)\s+("?[\w.]+"?)/i)?.[1] ?? 'unknown';
+  return { operation, table };
+};
+
 const checkExhaustion = () => {
   if (pool.totalCount >= maxPoolSize && pool.idleCount === 0) {
     logger.warn('DB Pool Exhaustion Warning: All connections are currently in use.', {
@@ -152,15 +162,27 @@ export const query = async (text: string, params?: unknown[]) => {
     throw new Error('Database pool is shutting down');
   }
   checkExhaustion();
+  // Captured before the first await so the stack trace points at the calling code
+  const callSite = new Error('Slow query call site').stack;
   return withRetry(async () => {
     const start = Date.now();
     const result = await pool.query(text, params);
     const duration = Date.now() - start;
+    const { operation, table } = describeQuery(text);
+    recordDbQueryDuration(duration / 1000, operation, table);
     logger.debug('Executed query', {
       text: text.substring(0, 50),
       duration,
       rows: result.rowCount,
     });
+    if (duration > SLOW_QUERY_THRESHOLD_MS) {
+      logger.warn('Slow query detected', {
+        text: text.substring(0, 500),
+        duration,
+        rows: result.rowCount,
+        stack: callSite,
+      });
+    }
     return result;
   });
 };
