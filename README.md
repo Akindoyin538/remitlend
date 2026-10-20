@@ -244,8 +244,5 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 <!-- handsoff-issue-340 -->
 - #340: frontend: add deterministic wallet and RPC test doubles
 
-<!-- handsoff-issue-563 -->
-- #563: observability: add tested redaction rules for logs, traces, and error reports
-
-<!-- handsoff-issue-565 -->
-- #565: security: add risk-based abuse controls for loan and remittance submission flows
+<!-- handsoff-issue-535 -->
+- #535: contracts: make pool rate changes continuous and non-retroactive

@@ -31,6 +31,14 @@ pub enum PoolError {
     ZeroShares = 14,
     /// Operation is paused (deposits, withdrawals, or yield distribution).
     OperationPaused = 15,
+    /// Caller is not authorized to distribute yield (not admin or registered distributor).
+    YieldDistributorNotAuthorized = 16,
+    /// Single distribution amount exceeds per-distribution limit.
+    YieldExceedsPerDistributionLimit = 17,
+    /// Cumulative yield distributed this period exceeds cumulative limit.
+    YieldExceedsCumulativeLimit = 18,
+    /// Yield distribution path or method is not supported.
+    UnauthorizedYieldPath = 19,
 }
 
 /// Granular pause flags for pool operations.
@@ -158,6 +166,19 @@ pub enum DataKey {
     TotalYieldDistributed(Address),
     ProposedAdmin,
     Version,
+    // Bounded yield distribution authorization (v4+)
+    /// Set of addresses authorized to distribute yield for a token
+    YieldDistributorsSet(Address),
+    /// token → max yield per single distribution call (0 = unlimited)
+    PerDistributionYieldLimit(Address),
+    /// token → cumulative yield limit across distribution period (0 = unlimited)
+    CumulativeYieldLimit(Address),
+    /// token → ledger sequence of last cumulative period reset
+    YieldDistributionPeriodReset(Address),
+    /// token → period length in ledgers for cumulative reset (0 = never resets)
+    YieldDistributionPeriod(Address),
+    /// (distributor, token) → cumulative yield distributed by this distributor (current period)
+    DistributorCumulativeYield(Address, Address),
 }
 
 #[contracttype]
@@ -369,6 +390,156 @@ impl LendingPool {
         Ok(())
     }
 
+    // ── Bounded yield authorization helpers ────────────────────────────────
+
+    /// Checks if `distributor` is authorized to distribute yield for `token`.
+    fn is_yield_distributor_authorized(env: &Env, token: &Address, distributor: &Address) -> bool {
+        let key = DataKey::YieldDistributorsSet(token.clone());
+        let distributors: Option<soroban_sdk::Vec<Address>> =
+            env.storage().instance().get(&key);
+        if let Some(dists) = distributors {
+            for d in dists.iter() {
+                if d == distributor {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Reads the per-distribution yield limit for a token. 0 = unlimited.
+    fn per_distribution_yield_limit(env: &Env, token: &Address) -> i128 {
+        Self::bump_instance_ttl(env);
+        env.storage()
+            .instance()
+            .get(&DataKey::PerDistributionYieldLimit(token.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Reads the cumulative yield limit for a token. 0 = unlimited.
+    fn cumulative_yield_limit(env: &Env, token: &Address) -> i128 {
+        Self::bump_instance_ttl(env);
+        env.storage()
+            .instance()
+            .get(&DataKey::CumulativeYieldLimit(token.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Reads the cumulative yield distribution period length in ledgers. 0 = no resets.
+    fn yield_distribution_period(env: &Env, token: &Address) -> u32 {
+        Self::bump_instance_ttl(env);
+        env.storage()
+            .instance()
+            .get(&DataKey::YieldDistributionPeriod(token.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Reads the ledger sequence of the last cumulative period reset for a token.
+    fn yield_distribution_period_reset(env: &Env, token: &Address) -> u32 {
+        Self::bump_instance_ttl(env);
+        env.storage()
+            .instance()
+            .get(&DataKey::YieldDistributionPeriodReset(token.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Reads cumulative yield distributed by a distributor in the current period.
+    fn distributor_cumulative_yield(env: &Env, distributor: &Address, token: &Address) -> i128 {
+        Self::bump_instance_ttl(env);
+        env.storage()
+            .instance()
+            .get(&DataKey::DistributorCumulativeYield(distributor.clone(), token.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Sets cumulative yield distributed by a distributor in the current period.
+    fn set_distributor_cumulative_yield(
+        env: &Env,
+        distributor: &Address,
+        token: &Address,
+        value: i128,
+    ) {
+        env.storage()
+            .instance()
+            .set(&DataKey::DistributorCumulativeYield(distributor.clone(), token.clone()), &value);
+    }
+
+    /// Determines authorization path for yield distribution and validates limits.
+    /// Returns true if distributor can proceed, Err if authorization fails.
+    fn check_yield_authorization(
+        env: &Env,
+        caller: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        let admin_addr = Self::admin(env);
+
+        // Path 1: Admin (no per-distribution limit)
+        if caller == &admin_addr {
+            return Ok(());
+        }
+
+        // Path 2: Authorized distributor (subject to per-distribution limit)
+        if Self::is_yield_distributor_authorized(env, token, caller) {
+            let limit = Self::per_distribution_yield_limit(env, token);
+            if limit > 0 && amount > limit {
+                return Err(PoolError::YieldExceedsPerDistributionLimit);
+            }
+            return Ok(());
+        }
+
+        // Not authorized
+        Err(PoolError::YieldDistributorNotAuthorized)
+    }
+
+    /// Checks and updates cumulative yield limits for all authorization paths.
+    /// Must be called after basic authorization checks pass.
+    fn check_and_update_cumulative_yield(
+        env: &Env,
+        distributor: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> Result<(), PoolError> {
+        let cumulative_limit = Self::cumulative_yield_limit(env, token);
+        if cumulative_limit == 0 {
+            // No cumulative limit enforced
+            return Ok(());
+        }
+
+        let period_length = Self::yield_distribution_period(env, token);
+        let current_ledger = env.ledger().sequence();
+        let last_reset = Self::yield_distribution_period_reset(env, token);
+
+        // Check if period has elapsed and reset cumulative if needed
+        let should_reset = if period_length > 0 && last_reset > 0 {
+            current_ledger > last_reset.saturating_add(period_length)
+        } else {
+            false
+        };
+
+        let mut current_cumulative = if should_reset {
+            // Period elapsed: reset cumulative to 0
+            env.storage()
+                .instance()
+                .set(&DataKey::YieldDistributionPeriodReset(token.clone()), &current_ledger);
+            0i128
+        } else {
+            Self::distributor_cumulative_yield(env, distributor, token)
+        };
+
+        // Check if adding amount would exceed cumulative limit
+        let new_cumulative = current_cumulative
+            .checked_add(amount)
+            .expect("cumulative yield overflow");
+        if new_cumulative > cumulative_limit {
+            return Err(PoolError::YieldExceedsCumulativeLimit);
+        }
+
+        // Update cumulative for this distributor
+        Self::set_distributor_cumulative_yield(env, distributor, token, new_cumulative);
+        Ok(())
+    }
+
     // ── Share / asset math ────────────────────────────────────────────────
 
     /// LP shares to mint for `amount` of deposited assets.
@@ -449,7 +620,7 @@ impl LendingPool {
         token: &Address,
         shares: i128,
         min_assets_out: i128,
-    ) -> Result<(), PoolError> {
+    ) -> Result<i128, PoolError> {
         if shares <= 0 {
             return Err(PoolError::InvalidAmount);
         }
@@ -542,7 +713,7 @@ impl LendingPool {
             assets_to_return,
             shares,
         );
-        Ok(())
+        Ok(assets_to_return)
     }
 
     // ── Admin / lifecycle ─────────────────────────────────────────────────
@@ -652,6 +823,34 @@ impl LendingPool {
 
     pub fn get_withdrawal_cooldown(env: Env) -> u32 {
         Self::withdrawal_cooldown(&env)
+    }
+
+    // ── Bounded yield authorization queries ─────────────────────────────
+
+    /// Returns all authorized distributors for `token`.
+    pub fn get_authorized_distributors(env: Env, token: Address) -> soroban_sdk::Vec<Address> {
+        let key = DataKey::YieldDistributorsSet(token);
+        env.storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env))
+    }
+
+    /// Returns `(per_distribution_limit, cumulative_limit, period_ledgers)` for `token`.
+    pub fn get_yield_limits(
+        env: Env,
+        token: Address,
+    ) -> (i128, i128, u32) {
+        (
+            Self::per_distribution_yield_limit(&env, &token),
+            Self::cumulative_yield_limit(&env, &token),
+            Self::yield_distribution_period(&env, &token),
+        )
+    }
+
+    /// Returns cumulative yield distributed by `distributor` for `token` in the current period.
+    pub fn get_distributor_yield_used(env: Env, distributor: Address, token: Address) -> i128 {
+        Self::distributor_cumulative_yield(&env, &distributor, &token)
     }
 
     // ── Core pool operations ──────────────────────────────────────────────
@@ -812,10 +1011,19 @@ impl LendingPool {
     /// Recognize `amount` of `token` already transferred by `from` into the
     /// pool as realized yield: the sole "accrual path" that legitimately
     /// grows `total_managed_assets` (and therefore the share price) without
-    /// minting shares. Unlike a bare token transfer to the pool's address,
-    /// which is deliberately ignored for pricing, this performs the real
-    /// transfer itself and requires `from`'s authorization, so it cannot be
-    /// used to move the price at someone else's expense (#1380).
+    /// Recognize `amount` of `token` already transferred by `from` into the
+    /// pool as realized yield: the sole "accrual path" that legitimately
+    /// grows `total_managed_assets` (and therefore the share price) without
+    /// minting shares.
+    ///
+    /// **Bounded authorization (v4+):** Requires `from` to be either:
+    /// - The pool admin (no per-distribution limit), or
+    /// - An authorized distributor (subject to per-distribution and cumulative limits)
+    ///
+    /// Unlike a bare token transfer to the pool's address, which is deliberately
+    /// ignored for pricing, this performs the real transfer itself and requires
+    /// `from`'s authorization, so it cannot be used to move the price at
+    /// someone else's expense (#1380).
     pub fn distribute_yield(
         env: Env,
         from: Address,
@@ -829,6 +1037,12 @@ impl LendingPool {
         if amount <= 0 {
             return Err(PoolError::InvalidAmount);
         }
+
+        // Check authorization and per-distribution limit
+        Self::check_yield_authorization(&env, &from, &token, amount)?;
+
+        // Check and update cumulative yield limit
+        Self::check_and_update_cumulative_yield(&env, &from, &token, amount)?;
 
         TokenClient::new(&env, &token).transfer(&from, &env.current_contract_address(), &amount);
 
@@ -847,6 +1061,175 @@ impl LendingPool {
             updated,
             Self::total_shares(&env, &token),
         );
+        Ok(())
+    }
+
+    // ── Bounded yield authorization management ──────────────────────────
+
+    /// Authorizes `distributor` to distribute yield for `token`.
+    /// Admin-only. Idempotent: authorizing an already-authorized distributor is a no-op.
+    pub fn authorize_yield_distributor(
+        env: Env,
+        admin: Address,
+        token: Address,
+        distributor: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+
+        let actual_admin = Self::admin(&env);
+        if admin != actual_admin {
+            return Err(PoolError::UnauthorizedYieldPath);
+        }
+
+        let key = DataKey::YieldDistributorsSet(token.clone());
+        let mut distributors: soroban_sdk::Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+
+        // Check if already authorized
+        for d in distributors.iter() {
+            if d == &distributor {
+                return Ok(()); // Already authorized, idempotent
+            }
+        }
+
+        // Add new distributor
+        distributors.push_back(distributor.clone());
+        env.storage().instance().set(&key, &distributors);
+
+        yield_distributor_authorized(&env, token, distributor);
+        Ok(())
+    }
+
+    /// Revokes authorization for `distributor` to distribute yield for `token`.
+    /// Admin-only. Idempotent: revoking a non-authorized distributor is a no-op.
+    pub fn revoke_yield_distributor(
+        env: Env,
+        admin: Address,
+        token: Address,
+        distributor: Address,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+
+        let actual_admin = Self::admin(&env);
+        if admin != actual_admin {
+            return Err(PoolError::UnauthorizedYieldPath);
+        }
+
+        let key = DataKey::YieldDistributorsSet(token.clone());
+        let mut distributors: soroban_sdk::Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+
+        // Find and remove distributor
+        let mut found = false;
+        let mut new_distributors = soroban_sdk::Vec::new(&env);
+        for d in distributors.iter() {
+            if d != &distributor {
+                new_distributors.push_back(d);
+            } else {
+                found = true;
+            }
+        }
+
+        if found {
+            env.storage().instance().set(&key, &new_distributors);
+            yield_distributor_revoked(&env, token, distributor);
+        }
+
+        Ok(())
+    }
+
+    /// Sets the per-distribution yield limit for `token`.
+    /// Admin-only. 0 = no limit (unlimited).
+    pub fn set_per_distribution_yield_limit(
+        env: Env,
+        admin: Address,
+        token: Address,
+        limit: i128,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+
+        let actual_admin = Self::admin(&env);
+        if admin != actual_admin {
+            return Err(PoolError::UnauthorizedYieldPath);
+        }
+
+        if limit < 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PerDistributionYieldLimit(token.clone()), &limit);
+
+        per_distribution_limit_updated(&env, token, limit);
+        Ok(())
+    }
+
+    /// Sets the cumulative yield limit for `token`.
+    /// Admin-only. 0 = no limit (unlimited).
+    pub fn set_cumulative_yield_limit(
+        env: Env,
+        admin: Address,
+        token: Address,
+        limit: i128,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+
+        let actual_admin = Self::admin(&env);
+        if admin != actual_admin {
+            return Err(PoolError::UnauthorizedYieldPath);
+        }
+
+        if limit < 0 {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::CumulativeYieldLimit(token.clone()), &limit);
+
+        cumulative_yield_limit_updated(&env, token, limit);
+        Ok(())
+    }
+
+    /// Sets the yield distribution period length (ledgers) for cumulative reset.
+    /// Admin-only. 0 = cumulative never resets.
+    pub fn set_yield_distribution_period(
+        env: Env,
+        admin: Address,
+        token: Address,
+        period_ledgers: u32,
+    ) -> Result<(), PoolError> {
+        admin.require_auth();
+
+        let actual_admin = Self::admin(&env);
+        if admin != actual_admin {
+            return Err(PoolError::UnauthorizedYieldPath);
+        }
+
+        // Allow 0 (no resets) or reasonable period lengths
+        const MAX_PERIOD_LEDGERS: u32 = 17_280 * 365; // ~1 year
+        if period_ledgers > MAX_PERIOD_LEDGERS {
+            return Err(PoolError::InvalidAmount);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::YieldDistributionPeriod(token.clone()), &period_ledgers);
+
+        // Initialize or reset the period reset timestamp
+        let current_ledger = env.ledger().sequence();
+        env.storage()
+            .instance()
+            .set(&DataKey::YieldDistributionPeriodReset(token.clone()), &current_ledger);
+
+        yield_distribution_period_updated(&env, token, period_ledgers);
         Ok(())
     }
 
@@ -942,11 +1325,16 @@ impl LendingPool {
         Self::assert_not_paused(&env)?;
         Self::assert_withdrawals_not_paused(&env)?;
         Self::assert_withdrawal_cooldown_elapsed(&env, &provider, &token);
-        Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)
+        Self::redeem_shares(&env, &provider, &token, shares, min_assets_out).map(|_| ())
     }
 
     /// Same as `withdraw` but bypasses the pause flag and cooldown. Still
     /// enforces `min_assets_out`.
+    ///
+    /// Emits an `EmergencySolvencyProof` event with the live idle balance
+    /// before and after the payout and the post-payout managed assets, so
+    /// off-chain monitors can verify the pool stayed solvent on every
+    /// emergency exit.
     pub fn emergency_withdraw(
         env: Env,
         provider: Address,
@@ -955,7 +1343,22 @@ impl LendingPool {
         min_assets_out: i128,
     ) -> Result<(), PoolError> {
         provider.require_auth();
-        Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)
+        let idle_before = Self::read_pool_balance(&env, &token);
+        let assets_paid = Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)?;
+        let idle_after = Self::read_pool_balance(&env, &token);
+        let managed_after = Self::total_managed_assets(&env, &token);
+        // Solvency invariant: the payout was drawn from idle liquidity and
+        // neither the live balance nor the tracked assets went negative.
+        if idle_after < 0 || managed_after < 0 || idle_before - idle_after != assets_paid {
+            return Err(PoolError::InsufficientLiquidity);
+        }
+        emergency_solvency_proof(
+            &env,
+            provider,
+            token,
+            (assets_paid, idle_before, idle_after, managed_after),
+        );
+        Ok(())
     }
 
     // ── Cooldown views ────────────────────────────────────────────────────
