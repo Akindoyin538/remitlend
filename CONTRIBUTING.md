@@ -97,6 +97,57 @@ When opening a PR, ensure your description includes:
 
 Before setting up the project locally, review the full environment variable reference in [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). Each `.env.example` file contains a pointer to this canonical reference. If you add a new environment variable, update both the relevant `.env.example` and the table in `ENVIRONMENT.md`.
 
+## Contract Storage Migration Manifests
+
+Every contract version that changes persisted storage **must** ship a storage
+migration manifest. The manifest is the single source of truth for how on-chain
+state moves from the previous version to the new one, and it is reviewed as part
+of the contract PR.
+
+### What a manifest must contain
+
+- **Version identifiers**: the `from` and `to` contract versions (semver) and the
+  on-chain storage schema version each maps to.
+- **Storage layout**: every key/namespace the version reads or writes, its
+  encoding, and whether it is added, unchanged, or removed.
+- **Migration steps**: the ordered, idempotent operations that transform `from`
+  state into `to` state, one manifest per consecutive version pair.
+
+### Compatibility rules
+
+- Migrations must be **additive** by default: new keys are introduced without
+  rewriting existing entries, so deployed contracts and persisted data keep
+  working.
+- Any **breaking** change (key rename, encoding change, removal) must be called
+  out explicitly in the manifest with a documented rollback path.
+- A manifest is required for **every** contract version, including no-op
+  versions, so the version chain is never ambiguous.
+
+### Validation and resource bounds
+
+- Migrations validate preconditions before mutating state: the stored schema
+  version must match the manifest's `from` version, and the expected storage
+  shape must be present. A mismatch aborts the migration without partial writes.
+- Migration work is bounded: process a fixed maximum number of entries per
+  invocation and resume from a recorded cursor rather than looping unbounded.
+
+### Authorization, failure, and rollback
+
+- Only the contract admin (per the contract's authorization model) may trigger a
+  migration; unauthorized callers are rejected before any state is read or
+  written.
+- Migrations are idempotent and safe to retry: a failed or interrupted run
+  leaves the recorded version unchanged and can be re-invoked.
+- Stale data (a version behind the manifest's `from`) is rejected with a
+  structured error rather than silently coerced.
+- Rollback restores the previous version marker and reverses only the additive
+  steps documented in the manifest; breaking migrations must document their
+  manual rollback procedure.
+
+When you add or bump a contract version, add its manifest alongside the
+contract and reference it in the PR description under compatibility impact and
+rollout steps.
+
 ## Testing Requirements
 
 Before submitting, verify your changes by running:
@@ -195,40 +246,4 @@ suite and runs in CI.
   retried.
 - Stale or unavailable data (dependency failure) and authorization failure
   states.
-- Boundary values: zero, minimum, and maximum representable amounts.
-
-**Rules for visual regression tests:**
-
-- Derive every displayed amount, status, and chain state from the same
-  authoritative source the app uses at runtime (API/contract responses or the
-  shared financial formatting utilities). **Never hard-code or mock financial
-  arithmetic in a story or snapshot** — a mocked number can silently diverge
-  from production.
-- Cover the success path plus the failure paths listed above (authorization
-  failure, boundary values, retries, stale data, dependency failure) for each
-  critical financial surface you touch.
-- Keep snapshots deterministic: pin the viewport, freeze time and locale, and
-  disable animations (`prefers-reduced-motion`) so diffs reflect real changes
-  only.
-- When a visual change is intentional, update the baseline in the same PR and
-  call it out in the PR description with before/after images.
-
-**Running locally:**
-
-```bash
-cd frontend
-npm run build
-npx playwright test e2e/visual --project=chromium --update-snapshots
-```
-
-Omit `--update-snapshots` to verify against the committed baselines the way CI
-does. New critical financial surfaces must add their route/state to the visual
-regression suite in the same PR that introduces them.
-
-## Style Guides
-
-- **TypeScript**: Use functional components and hooks. Prefer `interface` over `type`. Ensure strict typing.
-- **Rust**: Follow standard Rust naming conventions and maintain idiomatic code.
-
----
-Thank you for contributing to RemitLend! 🚀
+- Boundary value

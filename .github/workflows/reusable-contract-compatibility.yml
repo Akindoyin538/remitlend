@@ -6,8 +6,9 @@
 #              compatibility baseline. Deterministic; no mainnet creds.
 #
 # Validates that the env-var contract IDs are well-formed, present in
-# docs/deployed-contracts.md, and that the configured RPC is reachable.
-# The check is read-only and requires no elevated permissions.
+# docs/deployed-contracts.md, that the configured RPC is reachable, and that
+# every contract version has a storage migration manifest with a documented
+# rollback path. The check is read-only and requires no elevated permissions.
 name: Contract Compatibility (reusable)
 
 on:
