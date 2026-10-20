@@ -8,6 +8,12 @@ For what our security posture explicitly relies on — and what it deliberately
 does not cover (assumptions, accepted risks, compensating controls, review
 cadence) — see [docs/SECURITY-ASSUMPTIONS.md](docs/SECURITY-ASSUMPTIONS.md).
 
+For the outbound egress allowlist — approved destination classes per service
+(API, worker, webhook, telemetry, build), the production network policy that
+denies unlisted destinations, the CI check that flags new outbound clients, and
+the policy-drift steps for incident response — see
+[docs/EGRESS-POLICY.md](docs/EGRESS-POLICY.md).
+
 
 ## Supported Versions
 
