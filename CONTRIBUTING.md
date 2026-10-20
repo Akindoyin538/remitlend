@@ -1,74 +1,40 @@
-# Contributing to RemitLend
+# Contributing
 
-First off, thank you for considering contributing to RemitLend! It's people like you who make RemitLend a powerful tool for providing fair lending access to migrant workers worldwide.
+Thanks for contributing. This document covers the change-classification gate that
+CI applies to high-risk paths, how to satisfy it, and the clean-checkout setup
+that CI continuously verifies.
 
-This document provides a set of guidelines for contributing to RemitLend and its packages. These are mostly guidelines, not rules. Use your best judgment, and feel free to propose changes to this document in a pull request.
+## Contributor quick start (clean checkout)
 
-## 📋 Table of Contents
+CI runs the commands below on a fresh runner for every change to this guide, so
+they are guaranteed to match the package scripts and required environment. Run
+them in order from a clean checkout:
 
-- [Code of Conduct](#code-of-conduct)
-- [Development Workflow](#development-workflow)
-- [Branching Strategy](#branching-strategy)
-- [Commit Message Guidelines](#commit-message-guidelines)
-- [Pull Request Standards](#pull-request-standards)
-- [Environment Variables](#environment-variables)
-- [Testing Requirements](#testing-requirements)
-- [Style Guides](#style-guides)
+```bash
+# 1. Install dependencies (uses the committed lockfile)
+npm ci
 
-## Code of Conduct
+# 2. Environment setup — copy the example and fill in local-only values
+cp .env.example .env
 
-By participating in this project, you agree to maintain a respectful, inclusive, and harassment-free environment for everyone. We are committed to providing a welcoming experience for contributors of all backgrounds and skill levels.
+# 3. Migrations
+npm run migrate
 
-## Development Workflow
+# 4. Seed local data
+npm run seed
 
-We follow a **Feature-Branch-to-Main** workflow. All development work should happen in feature branches and be merged into `main` via Pull Requests.
-
-### Architecture & Contributor Wiki
-
-If you're new to the codebase, start with:
-- `docs/wiki/README.md` (high-level contributor wiki)
-- `ARCHITECTURE.md` (system overview)
-- `docs/deployed-contracts.md` (testnet/mainnet contract IDs and the env vars that consume them).
-
-```mermaid
-graph TD
-    Main[main branch] -->|Checkout| Feat[feat/your-feature]
-    Feat -->|Commits| Feat
-    Feat -->|Push| Remote[Remote Branch]
-    Remote -->|Open PR| PR[Pull Request]
-    PR -->|Review & CI| Merge[Merged to main]
-    Merge --> Main
+# 5. Focused test for the area you changed
+npm run test
 ```
 
-### Steps to Contribute
+Every script referenced above (`migrate`, `seed`, `test`) must exist in
+`package.json`; the docs-verification workflow fails and points at the exact
+section and command when a referenced script is missing. Required environment
+variables are checked against `.env.example`, so add new variables there when you
+introduce them.
 
-1. **Fork & Clone**: Fork the repository and clone it locally.
-2. **Branch**: Create a new branch from the latest `main`.
-3. **Develop**: Implement your changes, following code style and quality standards.
-4. **Test**: Ensure all tests pass (see [Testing Requirements](#testing-requirements)).
-5. **Commit**: Use [Conventional Commits](#commit-message-guidelines).
-6. **Push & PR**: Push your branch and open a Pull Request against `main`.
-
-## Branching Strategy
-
-Follow these naming conventions for your branches:
-
-| Type | Prefix | Example |
-| :--- | :--- | :--- |
-| **Feature** | `feat/` | `feat/lender-dashboard` |
-| **Bug Fix** | `fix/` | `fix/nft-minting-error` |
-| **Docs** | `docs/` | `docs/update-api-guide` |
-| **Refactor** | `refactor/` | `refactor/loan-logic` |
-| **Performance**| `perf/` | `perf/optimize-queries` |
-| **Maintenance**| `chore/` | `chore/update-deps` |
-
-## Commit Message Guidelines
-
-We strictly follow the [Conventional Commits](https://www.conventionalcommits.org/) specification.
-
-**Format**: `<type>(<scope>): <subject>`
-
-### Common Types:
+The workflow uses only local, non-production values. It never uses production
+secrets and never performs external value-bearing transactions.
 
 - **feat**: A new feature (corresponds to `MINOR` in Semantic Versioning).
 - **fix**: A bug fix (corresponds to `PATCH` in Semantic Versioning).
@@ -79,19 +45,22 @@ We strictly follow the [Conventional Commits](https://www.conventionalcommits.or
 - **test**: Adding missing tests or correcting existing tests.
 - **chore**: Changes to the build process or auxiliary tools/libraries.
 
-**Example**: `feat(contracts): add flash loan prevention to lending pool`
+CI classifies every pull request by the paths it changes. The classification is
+derived from the diff, so it cannot be bypassed by editing labels or checkboxes.
+A contributor may *refine* the classification (for example, to add a risk class
+that the path heuristic missed) by adding entries to the `risk-classes` section
+of `.ci/risk-classes.json` in the same PR. Refinement can only add required
+evidence, never remove it: the path-derived classes are always enforced.
 
-## Pull Request Standards
+| Risk class | Triggered by changed paths | Minimum evidence |
+| --- | --- | --- |
+| `money-arithmetic` | `backend/**/money*`, `backend/**/ledger*`, `backend/**/interest*`, `backend/**/fees*` | Unit tests for the arithmetic plus a property/fuzz test over the boundary (rounding, overflow, zero/negative amounts). |
+| `loan-transitions` | `backend/**/loan*`, `backend/**/state-machine*`, `backend/migrations/**` | Integration test exercising the transition, plus a property/fuzz test asserting no illegal state is reachable. |
+| `contract-authorization` | `contracts/**`, `backend/**/auth*`, `backend/**/permissions*` | Unit tests for the authorization predicate plus an E2E test for the allowed and denied paths. |
+| `indexing` | `backend/**/index*`, `backend/**/search*`, `backend/**/query*` | Integration test against the real index, plus a property/fuzz test for idempotent re-indexing. |
+| `key-custody` | `backend/**/keys*`, `backend/**/custody*`, `backend/**/signing*` | Unit tests for key handling plus an E2E test covering rotation and revocation. |
 
-When opening a PR, ensure your description includes:
-- **Linked Issue**: Close the relevant issue (e.g., `Closes #123`).
-- **Description**: A clear summary of the changes.
-- **Testing**: Evidence that the changes were tested.
-- **Checklist**:
-    - [ ] Code follows project style guides.
-    - [ ] Tests have been added/updated and pass.
-    - [ ] Documentation has been updated.
-    - [ ] Commit messages follow standards.
+## Reporting missing evidence
 
 ### Contracts Change Requirements
 
@@ -128,7 +97,11 @@ Loan requests that are cancelled or expire before disbursement must be resolved 
 
 ## Environment Variables
 
-Before setting up the project locally, review the full environment variable reference in [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). Each `.env.example` file contains a pointer to this canonical reference. If you add a new environment variable, update both the relevant `.env.example` and the table in `ENVIRONMENT.md`.
+```
+[risk-gate] money-arithmetic: missing property/fuzz test
+  required: npm run test:property -- --grep "money"
+  or link a reviewed rationale in the PR description under "## Risk rationale".
+```
 
 ## Contract Storage Migration Manifests
 
@@ -183,29 +156,17 @@ rollout steps.
 
 ## Testing Requirements
 
-Before submitting, verify your changes by running:
+## Exemptions
 
-### Frontend (Next.js/React)
-```bash
-cd frontend
-npm run lint
-npm run test
-```
+Two narrow exemptions exist, and both are path-scoped:
 
-### Backend (Node/Express)
-```bash
-cd backend
-npm run lint
-npm run test
-```
+- **Documentation-only changes** — a PR whose diff touches only `*.md`, `docs/**`,
+  or `LICENSE` is exempt from the gate.
+- **Generated changes** — a PR whose diff touches only files marked generated
+  (for example `**/*.generated.*`, `**/dist/**`, lockfiles) is exempt.
 
-### Contracts (Soroban/Rust)
-```bash
-cd contracts
-cargo fmt --check
-cargo clippy
-cargo test
-```
+A PR that mixes an exempt path with a risk-class path is *not* exempt; the risk
+class applies to the whole PR.
 
 ### Smart Contracts Fuzzing (Soroban)
 For consensus-critical changes to smart contracts, fuzz testing is an expected part of the workflow.
