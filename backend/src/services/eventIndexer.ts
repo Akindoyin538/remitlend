@@ -19,6 +19,7 @@ import { recordIndexerLedgers } from '../middleware/metrics.js';
 import { setPauseState } from '../middleware/pauseGuard.js';
 import { fromStroops } from '../money/decimal.js';
 import { LOAN_STATE_EVENT_TYPES } from './loanStateEventStore.js';
+import { AdaptiveScheduler, type SchedulerConfig } from './adaptiveScheduler.js';
 
 const LOAN_STATE_EVENT_TYPE_SET = new Set<string>(LOAN_STATE_EVENT_TYPES);
 
@@ -100,6 +101,14 @@ interface EventIndexerConfig {
   contractConfigs?: Array<{ contractId: string }>;
   pollIntervalMs?: number;
   batchSize?: number;
+  /**
+   * When true the indexer wires up an AdaptiveScheduler that adjusts poll
+   * frequency based on observed chain activity. Disabled by default so
+   * existing deployments are unaffected.
+   */
+  adaptiveSchedulingEnabled?: boolean;
+  /** Optional configuration overrides forwarded to AdaptiveScheduler. */
+  schedulerConfig?: SchedulerConfig;
 }
 
 interface StoreEventsResult {
@@ -122,6 +131,19 @@ export class EventIndexer {
   private running = false;
   private pollTimeout: NodeJS.Timeout | null = null;
   private activePollPromise: Promise<void> | null = null;
+  /** Populated only when {@link EventIndexerConfig.adaptiveSchedulingEnabled} is true. */
+  private readonly adaptiveScheduler: AdaptiveScheduler | null = null;
+  /**
+   * Tracks the next poll interval to use. Updated by the adaptive scheduler
+   * when adaptive scheduling is enabled; otherwise always equals pollIntervalMs.
+   */
+  private nextPollIntervalMs: number;
+  /**
+   * Tracks the batch size to use for the next poll. Updated by the adaptive
+   * scheduler when adaptive scheduling is enabled; otherwise always equals
+   * batchSize.
+   */
+  private nextBatchSize: number;
 
   constructor(config: EventIndexerConfig);
   constructor(rpcUrl: string, contractId: string);
@@ -138,6 +160,8 @@ export class EventIndexer {
       this.contractIds = [contractId];
       this.pollIntervalMs = 30_000;
       this.batchSize = 100;
+      this.nextPollIntervalMs = 30_000;
+      this.nextBatchSize = 100;
       return;
     }
 
@@ -157,10 +181,31 @@ export class EventIndexer {
     this.contractIds = [...new Set(normalized)];
     this.pollIntervalMs = configOrRpcUrl.pollIntervalMs ?? 30_000;
     this.batchSize = configOrRpcUrl.batchSize ?? 100;
+    this.nextPollIntervalMs = this.pollIntervalMs;
+    this.nextBatchSize = this.batchSize;
+    if (configOrRpcUrl.adaptiveSchedulingEnabled) {
+      this.adaptiveScheduler = new AdaptiveScheduler(
+        this.contractIds[0] ?? 'default',
+        configOrRpcUrl.schedulerConfig,
+      );
+      // Initialize the scheduler asynchronously; failures are non-fatal since
+      // the scheduler falls back to in-memory defaults when the DB is unavailable.
+      this.adaptiveScheduler.initialize().catch((error) => {
+        logger.withContext().warn('AdaptiveScheduler initialization failed', { error });
+      });
+    }
   }
 
   async ingestRawEvents(events: SorobanRawEvent[]): Promise<StoreEventsResult> {
     return this.storeEvents(events);
+  }
+
+  /**
+   * Returns the {@link AdaptiveScheduler} instance when adaptive scheduling
+   * was enabled at construction time, otherwise `null`.
+   */
+  getAdaptiveScheduler(): AdaptiveScheduler | null {
+    return this.adaptiveScheduler;
   }
 
   isEventParseable(event: SorobanRawEvent): boolean {
@@ -256,6 +301,11 @@ export class EventIndexer {
   private scheduleNextPoll(): void {
     if (!this.running) return;
 
+    // When adaptive scheduling is enabled, nextPollIntervalMs is updated by
+    // pollOnce() after each cycle (accounting for lag and any backoff).
+    // Otherwise it equals the fixed pollIntervalMs configured at construction.
+    const intervalMs = this.nextPollIntervalMs;
+
     this.pollTimeout = setTimeout(async () => {
       let pollPromise: Promise<void> | null = null;
       try {
@@ -270,35 +320,86 @@ export class EventIndexer {
         }
         this.scheduleNextPoll();
       }
-    }, this.pollIntervalMs);
+    }, intervalMs);
   }
 
   private async pollOnce(): Promise<void> {
     if (!this.running) return;
 
     const lastIndexedLedger = await this.getLastIndexedLedger();
-    const latestLedger = await this.getLatestLedgerSequence();
+
+    // Fetch latest chain tip; handle RPC failures with the adaptive scheduler.
+    let latestLedger: number;
+    try {
+      latestLedger = await this.getLatestLedgerSequence();
+    } catch (error) {
+      if (this.adaptiveScheduler) {
+        const reason =
+          error instanceof Error ? error.message : String(error ?? 'unknown RPC error');
+        const { backoffMs } = await this.adaptiveScheduler.recordFailure(reason);
+        // Apply backoff to the next poll interval
+        this.nextPollIntervalMs = this.pollIntervalMs + backoffMs;
+      }
+      return;
+    }
 
     // latestLedger === 0 means getLatestLedgerSequence failed (RPC error or
     // non-finite response).  Publishing lag=0 / chainTip=0 during an outage
     // would silently defeat the behind-chain-tip alert, so skip the metric
     // update and leave gauges at their last known values.
     if (latestLedger === 0) {
+      if (this.adaptiveScheduler) {
+        const { backoffMs } = await this.adaptiveScheduler.recordFailure(
+          'getLatestLedgerSequence returned 0',
+        );
+        this.nextPollIntervalMs = this.pollIntervalMs + backoffMs;
+      }
       return;
+    }
+
+    // Calculate lag and update adaptive schedule for the *next* poll before
+    // we do any work so that even if processChunk throws we have already set
+    // the right interval for the retry.
+    const lag = Math.max(0, latestLedger - lastIndexedLedger);
+
+    // Determine batch size: adaptive or fixed fallback.
+    let effectiveBatchSize = this.batchSize;
+    if (this.adaptiveScheduler) {
+      const schedule = this.adaptiveScheduler.calculateNextPoll(lag);
+      effectiveBatchSize = schedule.batchSize;
+      // next interval = adaptive base + any backoff
+      this.nextPollIntervalMs = schedule.intervalMs + schedule.backoffMs;
+      this.nextBatchSize = schedule.batchSize;
+
+      logger.withContext().info('Adaptive scheduler updated poll parameters', {
+        lag,
+        mode: schedule.mode,
+        intervalMs: schedule.intervalMs,
+        backoffMs: schedule.backoffMs,
+        batchSize: schedule.batchSize,
+      });
     }
 
     if (latestLedger <= lastIndexedLedger) {
       recordIndexerLedgers(lastIndexedLedger, latestLedger);
+      if (this.adaptiveScheduler) {
+        await this.adaptiveScheduler.recordSuccess(lag);
+      }
       return;
     }
 
     const fromLedger = lastIndexedLedger + 1;
-    const toLedger = Math.min(fromLedger + this.batchSize - 1, latestLedger);
+    const toLedger = Math.min(fromLedger + effectiveBatchSize - 1, latestLedger);
 
     const result = await this.processChunk(fromLedger, toLedger);
     await this.recordCheckpoint(fromLedger, result.lastProcessedLedger);
     await this.updateLastIndexedLedger(result.lastProcessedLedger);
     recordIndexerLedgers(result.lastProcessedLedger, latestLedger);
+
+    // Record success after a completed chunk so backoff is cleared.
+    if (this.adaptiveScheduler) {
+      await this.adaptiveScheduler.recordSuccess(lag);
+    }
   }
 
   /**

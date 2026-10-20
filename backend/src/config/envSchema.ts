@@ -92,6 +92,46 @@ export const envSchema = z.object({
   INDEXER_BATCH_SIZE: positiveInt(1, 10000).default(100 as unknown as never),
   INDEXER_HEALTH_LAG_LIMIT: positiveInt(1).default(100 as unknown as never),
 
+  // ── Indexer — adaptive scheduler ──────────────────────────────────────────
+  /** Enable the adaptive scheduler; set to "false" to use fixed polling. */
+  INDEXER_ADAPTIVE_SCHEDULING: booleanString().default('true' as unknown as never),
+
+  /**
+   * Ledger-lag threshold below which the indexer is considered "caught up".
+   * When lag ≤ this value the slow, steady-state poll interval is used.
+   */
+  INDEXER_CAUGHT_UP_THRESHOLD: positiveInt(1).default(50 as unknown as never),
+
+  /**
+   * Ledger-lag threshold above which the indexer is considered aggressively
+   * behind and switches to the fastest catch-up interval and batch size.
+   */
+  INDEXER_AGGRESSIVE_THRESHOLD: positiveInt(1).default(100 as unknown as never),
+
+  /** Poll interval (ms) when the indexer is caught up (lag ≤ CAUGHT_UP_THRESHOLD). */
+  INDEXER_INTERVAL_CAUGHT_UP_MS: positiveInt(1000).default(30000 as unknown as never),
+
+  /** Poll interval (ms) when the indexer is moderately behind. */
+  INDEXER_INTERVAL_BEHIND_MS: positiveInt(1000).default(10000 as unknown as never),
+
+  /** Poll interval (ms) when the indexer is aggressively catching up. */
+  INDEXER_INTERVAL_CATCH_UP_MS: positiveInt(100).default(3000 as unknown as never),
+
+  /** Batch size when the indexer is caught up. */
+  INDEXER_BATCH_SIZE_CAUGHT_UP: positiveInt(1, 10000).default(100 as unknown as never),
+
+  /** Batch size when the indexer is moderately behind. */
+  INDEXER_BATCH_SIZE_BEHIND: positiveInt(1, 10000).default(200 as unknown as never),
+
+  /** Batch size when the indexer is aggressively catching up. */
+  INDEXER_BATCH_SIZE_CATCH_UP: positiveInt(1, 10000).default(500 as unknown as never),
+
+  /** Base delay (ms) for exponential back-off on repeated indexer errors. */
+  INDEXER_BACKOFF_BASE_MS: positiveInt(100).default(5000 as unknown as never),
+
+  /** Maximum delay (ms) cap for exponential back-off on repeated indexer errors. */
+  INDEXER_BACKOFF_MAX_MS: positiveInt(1000).default(135000 as unknown as never),
+
   // ── Default checker ───────────────────────────────────────────────────────
   DEFAULT_CHECK_INTERVAL_MS: positiveInt(1000).default(1800000 as unknown as never),
   DEFAULT_CHECK_MAX_LOANS_PER_RUN: positiveInt(1).default(500 as unknown as never),
