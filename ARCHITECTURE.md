@@ -71,150 +71,73 @@ borrower is never asked to sign a request whose cost cannot be computed.
 
 See [docs/loan-cost-disclosure.md](docs/loan-cost-disclosure.md).
 
-## NFT Transfer Authorization
+## Transaction Recovery
 
-NFT transfers that require an off-chain signature use a domain-separated,
-EIP-712-style typed digest. The digest binds the authorization to the chain
-(`chainId`), the verifying contract address, and a transfer-specific typehash /
-purpose tag, so a signature produced for one domain or purpose can never be
-replayed against another. The signed payload additionally binds the token
-address, `from`, `to`, `tokenId`, a per-signer `nonce`, and a `deadline`.
+Every wallet-connected failure is classified into a typed failure state
+(`rejected`, `expired`, `failed`, `unknown`) and turned into a recovery plan by
+a pure function (`planTransactionRecovery`). The plan always states whether
+resubmission is safe. **Once a signed transaction has been handed to the
+network, the plan contains no action that can create a second one** — the only
+safe actions are re-polling the same hash, inspecting the explorer, copying the
+transaction id, reloading, or contacting support. Status polling is bounded
+(`maxAttempts`, `requestTimeoutMs`, overall `timeoutMs`) and abort-aware, and it
+reports a dependency failure separately from a settled failure so an unreachable
+node is never presented as a failed transaction.
 
-### Validation
+See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
-- The domain (chain id, verifying contract, typehash) must match the deployed
-  contract exactly; mismatches are rejected with an explicit error.
-- The payload fields must match the transfer being executed; any mismatch is
-  rejected.
-- Expired authorizations (`deadline` in the past) are rejected.
-- Nonces are single-use; a replayed nonce is rejected.
+## Cross-Contract Interface Compatibility
 
-### Compatibility and Rollout
+The loan manager, lending pool, NFT, and backend clients evolve independently.
+A function rename or changed return semantics can compile locally yet break a
+deployed contract integration at runtime. To prevent this, public contract
+interfaces are pinned by **versioned compatibility fixtures** and checked in CI
+before any contract or client ABI change merges.
 
-The existing transfer entrypoints remain unchanged and continue to work. The
-domain-separated authorization path is versioned and opt-in, so deployed
-contracts and existing API consumers are unaffected until they explicitly
-adopt the new path. Rollout is staged: deploy the new path alongside the legacy
-entrypoint, migrate consumers, then retire the legacy path in a later release.
+### Versioned Fixtures
 
-### Failure, Retry, and Rollback
+Fixtures live under `contracts/compatibility/fixtures/` and are named by
+interface version (for example `loan_manager.v1.json`). Each fixture captures
+the surface used by production flows:
 
-- Authorization failures are typed and surfaced to the caller; they are not
-  retried automatically because a rejected signature will not become valid on
-  retry.
-- Transient dependency failures (e.g. RPC unavailability) are distinguished
-  from authorization failures and may be retried with bounded attempts.
-- Rollback is a configuration change: consumers can fall back to the legacy
-  entrypoint without a contract redeploy.
+- Function names and argument order/types.
+- Return shape.
+- Emitted events.
+- Error codes.
 
-### Observability
+### Compatibility Check
 
-Authorization failures emit structured errors carrying the failure category
-(domain mismatch, payload mismatch, expired, replayed nonce) without exposing
-signature material, and are recorded as metrics for alerting.
+A deterministic check (`contracts/compatibility/check.ts`) compares the current
+contract artifacts and client adapters against the declared baseline fixture.
+It requires no mainnet credentials and runs entirely against local artifacts.
 
-## Bounded Authorized-Minter Rotation
+- A **breaking change** (removed/renamed function, reordered or retyped
+  argument, changed return shape, removed event, or changed error code) fails
+  the check unless the fixture declares an explicit version bump.
+- Additive, backward-compatible changes pass without a version bump.
 
-Minter rotation is a privileged, owner/admin-only operation that replaces the
-contract's authorized minter. It is deliberately bounded so a compromised or
-buggy admin key cannot churn the minter set without limit.
+### CI Enforcement
 
-### Authorization
+The check is wired into the reusable contract-compatibility workflow so it runs
+before contract or client ABI changes merge. At least one end-to-end loan
+lifecycle test exercises the loan manager against the compatibility fixture.
 
-- Only the contract owner/admin may call `rotateMinter`. Any other caller is
-  rejected with a distinct `NotAuthorized` error before any state is read or
-  written.
-- Authorization is checked first so unauthorized callers cannot probe rotation
-  state (current minter, rotation index, cooldown) through revert reasons.
+### Supported Version Matrix
 
-### Validation and Structured Errors
+Supported contract/client version combinations are documented in the
+network-contract matrix (`docs/network-contract-matrix.md`). A client must only
+be deployed against a contract version listed as compatible for it.
 
-Inputs are validated with distinct, documented error codes so callers and
-monitoring can tell failure modes apart:
+## Observability
 
-- `NotAuthorized` — caller is not the owner/admin.
-- `ZeroAddress` — the proposed minter is the zero address.
-- `UnchangedMinter` — the proposed minter equals the current minter.
-- `RotationLimitReached` — the maximum number of rotations has been consumed.
-- `RotationCooldown` — the cooldown between rotations has not elapsed.
+- Structured errors are emitted for budget violations and dependency failures.
+- Metrics are recorded for route load, render, and bundle dimensions.
+- Operational diagnostics distinguish between unsupported environments and genuine regressions.
+- Transaction failures are classified before they reach the UI, and carry a
+  non-identifying support code (failure category, truncated transaction hash,
+  attempt counter) so a support ticket can be correlated without exposing user
+  data.
 
-### Bounded Resource Usage
+## Testing
 
-- A hard `maxRotations` cap bounds the total number of rotations over the
-  contract's lifetime; once reached, further rotations revert with
-  `RotationLimitReached`.
-- A `rotationCooldown` enforces a minimum interval between rotations, bounding
-  the rate of change even while the cap is not yet exhausted.
-- Both bounds are checked before mutating state, so a rejected rotation leaves
-  the current minter, rotation index, and timestamps untouched.
-
-### Observability and Audit
-
-Every successful rotation emits a `MinterRotated` event carrying the previous
-minter, the new minter, and the rotation index, providing an on-chain audit
-trail. Rejected rotations revert with their structured error code and do not
-emit the event.
-
-### Compatibility and Rollback
-
-- The existing minter authorization surface is preserved; rotation only changes
-  which address is authorized, not how authorization is consumed.
-- Rotation state (current minter, rotation index, last-rotation timestamp) is
-  persisted on-chain and readable, so off-chain consumers can reconcile.
-
-## Loan Cancellation and Expired-Request Cleanup
-
-Loan requests can be cancelled before disbursement, and expired requests are
-reclaimed by a bounded cleanup routine. Both paths are idempotent and preserve
-the existing loan-request storage layout.
-
-### Cancellation Authorization
-
-`cancelLoanRequest` is callable by the borrower, the assigned lender, or the
-contract admin. Any other caller is rejected with `NotAuthorized` before any
-state is read or written. Cancellation is only permitted from pre-disbursement
-states (`Pending`, `Approved`); requests already `Disbursed`, `Repaid`,
-`Cancelled`, or `Expired` are rejected with `AlreadyTerminal`.
-
-### Expired-Request Cleanup
-
-`cleanupExpiredRequests` processes at most `maxBatch` expired requests per call
-and returns the number processed, so iteration and gas are bounded regardless
-of backlog size. Each request is transitioned to `Expired` exactly once;
-re-processing an already-terminal request is a no-op, making the routine
-idempotent and safe to retry. Callers may page through the backlog by invoking
-the routine repeatedly until it returns zero.
-
-### Structured Errors and Events
-
-- `NotAuthorized` — caller is not borrower, lender, or admin.
-- `AlreadyTerminal` — request is not in a cancellable state.
-- `NotExpired` — cleanup was asked to expire a request whose deadline has not
-  passed.
-- `LoanRequestCancelled(requestId, caller)` — emitted on successful
-  cancellation.
-- `LoanRequestExpired(requestId)` — emitted once per request transitioned by
-  cleanup.
-
-### Compatibility and Migration
-
-- The loan-request struct and its storage slots are unchanged; no migration is
-  required and persisted data remains readable by existing consumers.
-- New entrypoints are additive; existing disbursement and repayment paths are
-  unaffected.
-- Off-chain consumers should treat `Cancelled` and `Expired` as terminal
-  statuses and derive user-visible status from on-chain state.
-
-### Rollout and Rollback
-
-- Deploy the additive entrypoints alongside the existing contract; no consumer
-  changes are required to keep current behavior.
-- Rollback is a configuration change: operators can stop invoking cleanup
-  without a redeploy, and cancellation can be disabled by pausing the
-  entrypoint.
-
-### Observability
-
-Cancellation and cleanup outcomes (success, unauthorized, already-terminal,
-expired) emit structured events and are recorded as metrics so operators can
-alert on unexpected rejection rates or cleanup backlogs.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Cross-contract interface compatibility is covered by fixture-driven checks and an end-to-end loan lifecycle test.

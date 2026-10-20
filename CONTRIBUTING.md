@@ -130,6 +130,57 @@ Loan requests that are cancelled or expire before disbursement must be resolved 
 
 Before setting up the project locally, review the full environment variable reference in [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). Each `.env.example` file contains a pointer to this canonical reference. If you add a new environment variable, update both the relevant `.env.example` and the table in `ENVIRONMENT.md`.
 
+## Contract Storage Migration Manifests
+
+Every contract version that changes persisted storage **must** ship a storage
+migration manifest. The manifest is the single source of truth for how on-chain
+state moves from the previous version to the new one, and it is reviewed as part
+of the contract PR.
+
+### What a manifest must contain
+
+- **Version identifiers**: the `from` and `to` contract versions (semver) and the
+  on-chain storage schema version each maps to.
+- **Storage layout**: every key/namespace the version reads or writes, its
+  encoding, and whether it is added, unchanged, or removed.
+- **Migration steps**: the ordered, idempotent operations that transform `from`
+  state into `to` state, one manifest per consecutive version pair.
+
+### Compatibility rules
+
+- Migrations must be **additive** by default: new keys are introduced without
+  rewriting existing entries, so deployed contracts and persisted data keep
+  working.
+- Any **breaking** change (key rename, encoding change, removal) must be called
+  out explicitly in the manifest with a documented rollback path.
+- A manifest is required for **every** contract version, including no-op
+  versions, so the version chain is never ambiguous.
+
+### Validation and resource bounds
+
+- Migrations validate preconditions before mutating state: the stored schema
+  version must match the manifest's `from` version, and the expected storage
+  shape must be present. A mismatch aborts the migration without partial writes.
+- Migration work is bounded: process a fixed maximum number of entries per
+  invocation and resume from a recorded cursor rather than looping unbounded.
+
+### Authorization, failure, and rollback
+
+- Only the contract admin (per the contract's authorization model) may trigger a
+  migration; unauthorized callers are rejected before any state is read or
+  written.
+- Migrations are idempotent and safe to retry: a failed or interrupted run
+  leaves the recorded version unchanged and can be re-invoked.
+- Stale data (a version behind the manifest's `from`) is rejected with a
+  structured error rather than silently coerced.
+- Rollback restores the previous version marker and reverses only the additive
+  steps documented in the manifest; breaking migrations must document their
+  manual rollback procedure.
+
+When you add or bump a contract version, add its manifest alongside the
+contract and reference it in the PR description under compatibility impact and
+rollout steps.
+
 ## Testing Requirements
 
 Before submitting, verify your changes by running:
@@ -175,6 +226,57 @@ technologies, so accessibility is a correctness requirement, not a nice-to-have.
 - Provide text alternatives for icons and charts; never encode meaning in colour
   alone.
 - Reuse the shared primitives (`components/ui/floating` for tooltips/popovers,
-  `components/ui/Modal`, etc.) rather tha
+  `components/ui/Modal`, etc.) rather than re-implementing focus traps and ARIA
+  wiring.
 
-/* … truncated 2304 chars — edit only what you need near the top … */
+**Charts and data visualisations:**
+
+- Every chart must ship an accessible data table that exposes the same values as
+  the visualisation. Render it with the shared `ChartDataTable` primitive
+  (`components/charts/ChartDataTable`) so the table is visually hidden by default
+  but remains in the accessibility tree, and is reachable via a visible
+  "View as table" toggle.
+- Chart elements (bars, points, slices, legend entries) must be keyboard
+  navigable: focusable with `Tab`, traversable with the arrow keys, and
+  activatable with `Enter`/`Space` where the element has an action. Announce the
+  focused datum through an `aria-live` region or `aria-describedby`.
+- Bound the rendered table: cap rows at the shared `MAX_CHART_TABLE_ROWS` limit
+  and paginate or virtualise beyond it so large datasets cannot exhaust the DOM.
+- Add a focused test for each chart covering the table contents, keyboard
+  traversal, and the row cap.
+
+**Automated checks:**
+
+- The **Accessibility** GitHub Actions workflow (`.github/workflows/a11y.yml`)
+  runs axe-core against critical pages via `e2e/a11y.spec.ts` and **fails the PR
+  on any new WCAG A/AA violation**. Run it locally with:
+
+  ```bash
+  cd frontend
+  npm run build
+  npx playwright test e2e/a11y.spec.ts --project=chromium
+  ```
+
+- When adding a new top-level page, add its route to `CRITICAL_PAGES` in
+  `e2e/a11y.spec.ts`.
+- Storybook ships the **@storybook/addon-a11y** panel; check it while developing
+  components in isolation (`npm run storybook`).
+- For live feedback while running the dev server, enable the in-browser axe
+  overlay by rendering `@axe-core/react` from a client component in development
+  only (dependency already declared in `frontend/package.json`).
+
+## Visual Regression Requirements
+
+Critical financial states must not change visually without an explicit,
+reviewable diff. Visual regression coverage lives alongside the Playwright e2e
+suite and runs in CI.
+
+**What counts as a critical financial state:**
+
+- Loan amounts, outstanding balances, accrued interest, and repayment
+  schedules.
+- Transaction lifecycle states: pending, submitted, confirmed, failed, and
+  retried.
+- Stale or unavailable data (dependency failure) and authorization failure
+  states.
+- Boundary value

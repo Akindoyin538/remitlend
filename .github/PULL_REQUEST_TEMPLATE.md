@@ -2,61 +2,82 @@
 
 ## Summary
 
-<!-- Describe what this PR changes and why. Link the issue(s) it closes. -->
+<!-- Describe what this PR changes and why. Link the issue. -->
 
 Closes #
 
-## Scope & Compatibility Impact
+## Scope
 
-<!--
-- Which contracts / modules / APIs are touched?
-- Does this change storage layout, event signatures, error codes, or public entrypoints?
-- Is it backward compatible with deployed contracts and existing API consumers / persisted data?
-- If not, describe the migration path and rollback plan.
--->
+<!-- Which boundary does this touch (contracts, backend, frontend, infra)? -->
 
-- [ ] No storage-layout change
-- [ ] No breaking change to public entrypoints / events / error codes
-- [ ] Migration required (describe below)
-- [ ] Rollback plan documented
+- [ ] Contracts
+- [ ] Backend API
+- [ ] Frontend
+- [ ] Infrastructure / tooling
+- [ ] Documentation only
 
-## Threat Model Notes
+## Threat model notes
 
-<!--
-For authorization, financial, or state-transition changes, document:
-- Who can call the new/changed entrypoints (borrower / lender / admin / anyone)?
-- What states are valid inputs, and what happens on invalid or terminal states?
-- Reentrancy, replay, and idempotency considerations.
-- Bounded resource usage (iteration limits, gas ceilings).
--->
+<!-- Required when the change affects authorization, financial arithmetic, chain state, or persisted data. -->
 
-## Rollout Steps
+- Actors and trust boundaries affected:
+- Authorization checks added or changed (who may call what, and the failure path for unauthorized callers):
+- Input validation and resource bounds (batch sizes, iteration limits, amount/reference validation):
+- Replay / retry / idempotency considerations:
+- Stale-data and dependency-failure behavior:
 
-<!-- Ordered steps to deploy safely: migrations, feature flags, admin actions, monitoring. -->
+## Compatibility impact
 
-1.
+<!-- Required for contract, API, or storage changes. -->
 
-## Verification Evidence
+- [ ] Additive only — no breaking signature or storage-layout changes
+- [ ] Breaking change (describe migration path below)
+- Deployed-contract compatibility:
+- API consumer compatibility:
+- Persisted-data / storage-layout compatibility:
 
-<!--
-List the narrowest relevant checks you ran and their results:
-- Package tests / type checks / lint
-- Contract tests
-- Integration or end-to-end scenario covering the full workflow
-- Before/after measurements for performance or data migrations
--->
+## Migration
 
-- [ ] Unit tests (success, authorization failure, boundary values, retries, stale data, dependency failure)
-- [ ] Contract tests
-- [ ] Type checks / lint
-- [ ] Integration / end-to-end scenario
+<!-- Storage layout, data migration, or manifest changes. Include before/after measurements where relevant. -->
+
+- Migration steps:
+- Rollback steps:
+- Before/after measurements (performance or data):
 
 ## Observability
 
 <!-- Metrics, structured errors, audit events, and operational diagnostics added or changed. -->
 
+- Metrics:
+- Structured errors:
+- Audit events:
+- Operational diagnostics / alerts:
+
+## Rollout
+
+<!-- Ordered steps to safely ship and verify in production. -->
+
+1.
+2.
+3.
+
+## Verification evidence
+
+<!-- Paste commands run and their results. Narrowest relevant package tests, type checks, linting, contract tests, and an integration/e2e scenario covering the full workflow. -->
+
+- [ ] Package tests
+- [ ] Type checks
+- [ ] Linting
+- [ ] Contract tests
+- [ ] Integration / end-to-end scenario
+
+```
+# commands and results
+```
+
 ## Checklist
 
-- [ ] Tests added/updated for new behavior and failure paths
-- [ ] Documentation updated (architecture / API / environment / migration / contributor docs)
-- [ ] No unrelated changes included
+- [ ] Financial arithmetic, chain state, and user-visible status derive from authoritative sources
+- [ ] Success, authorization failure, boundary values, retries, stale data, and dependency-failure paths have focused automated tests
+- [ ] Relevant architecture, API, environment, migration, or contributor documentation updated
+- [ ] Scope limited to the linked issue; unrelated changes excluded
