@@ -57,6 +57,48 @@ export const up = (pgm) => {
       type: 'text',
       allowNull: true,
     },
+    // Evidence trust taxonomy for scoring inputs (#559).
+    // source_type: where the fact originated.
+    // verification_status: how much the fact can be trusted.
+    // observed_ledger / observed_at: when the fact was observed.
+    // provenance_ref: reference to the originating record (tx hash, event id, claim id).
+    source_type: {
+      type: 'varchar(32)',
+      notNull: true,
+      default: 'self_reported',
+      check:
+        "source_type IN ('verified_onchain', 'provisional_indexer', 'self_reported')",
+    },
+    verification_status: {
+      type: 'varchar(32)',
+      notNull: true,
+      default: 'unverified',
+      check:
+        "verification_status IN ('verified', 'provisional', 'unverified', 'invalidated')",
+    },
+    observed_ledger: {
+      type: 'bigint',
+      allowNull: true,
+    },
+    observed_at: {
+      type: 'timestamp',
+      allowNull: true,
+    },
+    provenance_ref: {
+      type: 'varchar(128)',
+      allowNull: true,
+    },
+    // Versioned policy that authorizes this evidence to affect the authoritative score.
+    // NULL means the fact is non-authoritative and may only appear in previews.
+    policy_version: {
+      type: 'varchar(32)',
+      allowNull: true,
+    },
+    // Deduplication key so reconciliation cannot double-count the same fact.
+    fact_key: {
+      type: 'varchar(128)',
+      allowNull: true,
+    },
     created_at: {
       type: 'timestamp',
       notNull: true,
@@ -74,6 +116,14 @@ export const up = (pgm) => {
   pgm.createIndex('remittances', ['sender_id', 'status']);
   pgm.createIndex('remittances', 'created_at');
   pgm.createIndex('remittances', 'transaction_hash');
+
+  // Scoring boundary: only verified evidence with an explicit policy may be authoritative.
+  pgm.createIndex('remittances', ['verification_status', 'source_type']);
+  // Prevent duplicate ingestion of the same fact during reconciliation.
+  pgm.createIndex('remittances', 'fact_key', {
+    unique: true,
+    where: 'fact_key IS NOT NULL',
+  });
 };
 
 /**

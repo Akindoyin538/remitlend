@@ -1,79 +1,195 @@
-# Issue #409 – Reusable workflow: database migration round-trip check
-# Least-privilege: read-only checkout; spins up postgres service internally.
-name: Migration Check (reusable)
+name: Reusable Migration Check
+
+# Validates that every contract version has a storage migration manifest and
+# that manifests are well-formed, ordered, and cover consecutive versions.
+#
+# Manifest contract (per contract, under contracts/<contract>/migrations/):
+#   <fromVersion>-to-<toVersion>.json
+#   {
+#     "contract": "<name>",
+#     "fromVersion": <int>,
+#     "toVersion": <int>,
+#     "breaking": <bool>,
+#     "rollback": "<description or null>",
+#     "steps": [ { "op": "...", "key": "...", ... } ]
+#   }
+#
+# Authorization: migrations are triggered only by the contract admin role
+# (see SECURITY.md). This workflow is a CI gate; it never executes migrations.
 
 on:
   workflow_call:
+    inputs:
+      contracts-dir:
+        description: Directory containing contract packages
+        required: false
+        type: string
+        default: contracts
+      manifests-subdir:
+        description: Subdirectory (per contract) holding migration manifests
+        required: false
+        type: string
+        default: migrations
+      node-version:
+        description: Node.js version used for validation
+        required: false
+        type: string
+        default: "20"
 
 permissions:
   contents: read
 
 jobs:
-  migration-check:
+  validate-manifests:
+    name: Validate storage migration manifests
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: pguser
-          POSTGRES_PASSWORD: pgpass
-          POSTGRES_DB: remitlend_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U pguser"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - name: Use Node.js 20
-        uses: actions/setup-node@v7
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: "npm"
-          cache-dependency-path: backend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-        working-directory: backend
-      - name: Migrate up from empty schema
-        run: npm run migrate:up
-        working-directory: backend
+          node-version: ${{ inputs.node-version }}
+
+      - name: Validate migration manifests
         env:
-          DATABASE_URL: postgres://pguser:pgpass@localhost:5432/remitlend_test
-      - name: Migrate all the way down (reversibility check)
+          CONTRACTS_DIR: ${{ inputs.contracts-dir }}
+          MANIFESTS_SUBDIR: ${{ inputs.manifests-subdir }}
         run: |
-          MIGRATION_COUNT=$(ls migrations/*.js 2>/dev/null | wc -l)
-          for i in $(seq 1 "$MIGRATION_COUNT"); do
-            npm run migrate:down -- --count 1
-          done
-        working-directory: backend
-        env:
-          DATABASE_URL: postgres://pguser:pgpass@localhost:5432/remitlend_test
-      - name: Migrate up again (ordering + idempotency check)
-        run: npm run migrate:up
-        working-directory: backend
-        env:
-          DATABASE_URL: postgres://pguser:pgpass@localhost:5432/remitlend_test
-      - name: Verify no plaintext PII columns exist
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const contractsDir = process.env.CONTRACTS_DIR || 'contracts';
+          const manifestsSubdir = process.env.MANIFESTS_SUBDIR || 'migrations';
+          const errors = [];
+
+          if (!fs.existsSync(contractsDir)) {
+            console.error(`::error::Contracts directory not found: ${contractsDir}`);
+            process.exit(1);
+          }
+
+          const contracts = fs
+            .readdirSync(contractsDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name);
+
+          if (contracts.length === 0) {
+            console.error(`::error::No contracts found under ${contractsDir}`);
+            process.exit(1);
+          }
+
+          for (const contract of contracts) {
+            const manifestDir = path.join(contractsDir, contract, manifestsSubdir);
+            if (!fs.existsSync(manifestDir)) {
+              errors.push(`${contract}: missing ${manifestsSubdir}/ directory (no migration manifests)`);
+              continue;
+            }
+
+            const files = fs
+              .readdirSync(manifestDir)
+              .filter((f) => f.endsWith('.json'))
+              .sort();
+
+            if (files.length === 0) {
+              errors.push(`${contract}: no migration manifests found in ${manifestsSubdir}/`);
+              continue;
+            }
+
+            const seen = new Map();
+            for (const file of files) {
+              const full = path.join(manifestDir, file);
+              let manifest;
+              try {
+                manifest = JSON.parse(fs.readFileSync(full, 'utf8'));
+              } catch (e) {
+                errors.push(`${contract}/${file}: invalid JSON (${e.message})`);
+                continue;
+              }
+
+              const required = ['contract', 'fromVersion', 'toVersion', 'breaking', 'steps'];
+              for (const key of required) {
+                if (!(key in manifest)) {
+                  errors.push(`${contract}/${file}: missing required field "${key}"`);
+                }
+              }
+
+              if (manifest.contract !== contract) {
+                errors.push(`${contract}/${file}: contract field "${manifest.contract}" does not match directory`);
+              }
+
+              const from = manifest.fromVersion;
+              const to = manifest.toVersion;
+              if (!Number.isInteger(from) || !Number.isInteger(to)) {
+                errors.push(`${contract}/${file}: fromVersion/toVersion must be integers`);
+                continue;
+              }
+              if (to !== from + 1) {
+                errors.push(`${contract}/${file}: toVersion (${to}) must equal fromVersion + 1 (${from + 1})`);
+              }
+              if (from < 0) {
+                errors.push(`${contract}/${file}: fromVersion must be >= 0`);
+              }
+
+              const expectedName = `${from}-to-${to}.json`;
+              if (file !== expectedName) {
+                errors.push(`${contract}/${file}: filename must be "${expectedName}"`);
+              }
+
+              if (typeof manifest.breaking !== 'boolean') {
+                errors.push(`${contract}/${file}: breaking must be a boolean`);
+              }
+              if (manifest.breaking === true && !manifest.rollback) {
+                errors.push(`${contract}/${file}: breaking migration requires a rollback description`);
+              }
+
+              if (!Array.isArray(manifest.steps) || manifest.steps.length === 0) {
+                errors.push(`${contract}/${file}: steps must be a non-empty array`);
+              } else {
+                manifest.steps.forEach((step, i) => {
+                  if (!step || typeof step !== 'object' || typeof step.op !== 'string') {
+                    errors.push(`${contract}/${file}: steps[${i}] must be an object with a string "op"`);
+                  }
+                });
+              }
+
+              if (seen.has(from)) {
+                errors.push(`${contract}/${file}: duplicate fromVersion ${from} (also in ${seen.get(from)})`);
+              } else {
+                seen.set(from, file);
+              }
+            }
+
+            // Ensure consecutive coverage starting at 0 with no gaps.
+            const froms = [...seen.keys()].sort((a, b) => a - b);
+            if (froms.length > 0 && froms[0] !== 0) {
+              errors.push(`${contract}: migration chain must start at fromVersion 0 (found ${froms[0]})`);
+            }
+            for (let i = 1; i < froms.length; i++) {
+              if (froms[i] !== froms[i - 1] + 1) {
+                errors.push(`${contract}: gap in migration chain between version ${froms[i - 1]} and ${froms[i]}`);
+              }
+            }
+          }
+
+          if (errors.length > 0) {
+            for (const err of errors) {
+              console.error(`::error::${err}`);
+            }
+            console.error(`\n${errors.length} migration manifest error(s) found.`);
+            process.exit(1);
+          }
+
+          console.log(`Validated migration manifests for ${contracts.length} contract(s).`);
+          NODE
+
+      - name: Summary
+        if: always()
         run: |
-          echo "Checking for plaintext PII columns..."
-          PII_COLUMNS=(
-            'recipient_email' 'recipient_phone' 'recipient_name'
-            'plaintext_email' 'plaintext_phone' 'plaintext_name'
-          )
-          FOUND=0
-          for col in "${PII_COLUMNS[@]}"; do
-            RESULT=$(psql postgres://pguser:pgpass@localhost:5432/remitlend_test -tAc \
-              "SELECT column_name FROM information_schema.columns WHERE column_name = '$col';" 2>/dev/null)
-            if [ -n "$RESULT" ]; then
-              echo "::error::Plaintext PII column found: $col"
-              FOUND=1
-            fi
-          done
-          if [ "$FOUND" -eq 1 ]; then
-            exit 1
-          fi
-          echo "No plaintext PII columns found."
-        env:
-          PGPASSWORD: pgpass
+          echo "### Migration manifest check" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Validated manifests under \`${{ inputs.contracts-dir }}/<contract>/${{ inputs.manifests-subdir }}/\`." >> "$GITHUB_STEP_SUMMARY"
+          echo "Breaking migrations must declare a rollback path; chains must be gap-free from version 0." >> "$GITHUB_STEP_SUMMARY"

@@ -21,6 +21,7 @@
  */
 
 import type { NextFunction, Request, Response } from 'express';
+import { isSpanContextValid, TraceFlags, trace as otelTrace } from '@opentelemetry/api';
 import {
   TRACEPARENT_HEADER,
   TRACESTATE_HEADER,
@@ -70,6 +71,17 @@ export const traceContextMiddleware = (req: Request, res: Response, next: NextFu
         headerLength: incoming?.length,
       });
     }
+  }
+
+  // When OpenTelemetry (via Sentry) already opened a span for this request, reuse
+  // it so the traceparent we echo back is the one exported to Jaeger/Tempo.
+  const activeSpan = otelTrace.getActiveSpan()?.spanContext();
+  if (activeSpan && isSpanContextValid(activeSpan)) {
+    trace = {
+      traceId: activeSpan.traceId,
+      spanId: activeSpan.spanId,
+      sampled: (activeSpan.traceFlags & TraceFlags.SAMPLED) === TraceFlags.SAMPLED,
+    };
   }
 
   req.traceId = trace.traceId;
