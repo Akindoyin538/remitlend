@@ -77,7 +77,7 @@ We strictly follow the [Conventional Commits](https://www.conventionalcommits.or
 - **refactor**: A code change that neither fixes a bug nor adds a feature.
 - **perf**: A code change that improves performance.
 - **test**: Adding missing tests or correcting existing tests.
-- **chore**: Changes to the build process or auxiliary tools and libraries.
+- **chore**: Changes to the build process or auxiliary tools/libraries.
 
 **Example**: `feat(contracts): add flash loan prevention to lending pool`
 
@@ -92,6 +92,39 @@ When opening a PR, ensure your description includes:
     - [ ] Tests have been added/updated and pass.
     - [ ] Documentation has been updated.
     - [ ] Commit messages follow standards.
+
+### Contracts Change Requirements
+
+Changes under `contracts/` affect deployed, stateful on-chain code, so PRs touching them must additionally document:
+
+- **Threat model**: who can call the new/changed entry points, what they can influence, and the abuse cases considered (reentrancy, griefing, front-running, unauthorized callers).
+- **Authorization**: the exact auth checks (e.g. `require_auth`, admin/role gates) guarding each state-changing path, and the failure mode when they are not met.
+- **Compatibility impact**: whether storage keys, event shapes, or entry-point signatures change, and how existing deployed contracts, API consumers, and persisted data remain readable (or the migration path if not).
+- **Rollout & rollback**: ordered deployment steps (e.g. initialize → configure → enable) and how to safely revert if a step misbehaves.
+- **Verification evidence**: the narrowest relevant `cargo test` output plus any integration/e2e scenario exercising the full workflow.
+
+#### Liquidation & Unwind Policy
+
+When a loan becomes delinquent, contracts must resolve it through a **deterministic unwind policy** rather than ad-hoc admin action. Contributors implementing or modifying this path must ensure:
+
+- **Authorization**: only the configured liquidator role (or an authorized keeper) may trigger an unwind; unauthorized callers fail with an explicit error and emit no state change.
+- **Determinism**: the unwind outcome (collateral seizure, remaining balance, status transition) is a pure function of on-chain state — no wall-clock or off-chain inputs beyond the ledger timestamp already recorded.
+- **Bounded work**: any iteration over collateral, tranches, or schedules is capped by a configured maximum; exceeding the cap fails closed rather than looping unbounded.
+- **Idempotency & retries**: re-invoking an unwind on an already-unwound loan is a no-op or explicit error, never a double-seizure; partial failures leave state consistent for a safe retry.
+- **Observability**: emit structured events (loan id, prior status, seized amount, remaining balance, caller) and expose read-only status derived from authoritative on-chain state.
+- **Tests**: cover success, authorization failure, boundary values (zero/at-cap collateral), retry/idempotency, and stale or dependency-failure paths.
+
+#### Loan Cancellation & Expired-Request Cleanup
+
+Loan requests that are cancelled or expire before disbursement must be resolved through explicit, auditable entry points. Contributors implementing or modifying this path must ensure:
+
+- **Authorization**: cancellation is permitted only for the borrower, the assigned lender, or an admin, and only while the loan is in a pre-disbursement state (e.g. `Pending`/`Requested`). Any other caller or state fails with an explicit error and emits no state change.
+- **State guard**: cancellation is rejected once funds have been disbursed; terminal states (`Cancelled`, `Repaid`, `Liquidated`) are never re-cancelled.
+- **Expired-request cleanup**: a cleanup entry point processes requests whose deadline has passed relative to the recorded ledger timestamp. Iteration is capped by a configured maximum per invocation so a single call cannot loop unbounded; callers page through remaining requests.
+- **Idempotency & retries**: re-running cleanup over an already-cancelled/expired request is a no-op (or explicit `AlreadyTerminal` error), never a double state transition; partial progress leaves state consistent for a safe retry.
+- **Compatibility**: cancellation/cleanup must not change existing storage keys or entry-point signatures for already-deployed loans; any new keys or event shapes are additive and documented in the PR's compatibility-impact section.
+- **Observability**: emit structured events (loan id, prior status, caller, reason: `Cancelled`/`Expired`) and structured errors for `Unauthorized`, `AlreadyTerminal`, and `NotExpired` outcomes.
+- **Tests**: cover success, authorization failure, already-terminal, not-yet-expired boundary, at-cap cleanup batch, and retry/idempotency paths.
 
 ## Environment Variables
 
