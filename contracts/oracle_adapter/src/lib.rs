@@ -22,10 +22,7 @@ pub enum OracleAdapterError {
     PriceToleranceExceeded = 5,
     /// All available price readings are too old (exceed max_staleness)
     StaleReading = 6,
-    /// Price reading failed validation checks
-    InvalidPriceReading = 7,
-    /// Arithmetic operation resulted in overflow
-    ArithmeticOverflow = 8,
+    InvalidFreshnessWindow = 7,
 }
 
 // ============================================================================
@@ -217,39 +214,14 @@ impl OracleAdapter {
         Ok(())
     }
 
-    /// Get a validated price from oracle sources
-    ///
-    /// # Arguments
-    /// * `env` - Soroban environment
-    /// * `asset` - Asset symbol (e.g., "USDC", "USD")
-    /// * `max_staleness` - Maximum acceptable age of price in seconds
-    ///
-    /// # Returns
-    /// * `Ok(OraclePriceReading)` - Validated price reading
-    /// * `Err` - One of:
-    ///   - `NotInitialized` - Oracle not yet initialized
-    ///   - `StaleReading` - All prices exceed max_staleness
-    ///   - `PriceToleranceExceeded` - Sources disagree beyond tolerance
-    ///   - `NoValidOraclePrice` - No valid prices available
-    ///
-    /// # Logic
-    /// 1. Fetch price from primary (Zenith) source
-    /// 2. Fetch price from fallback (Reflector) source
-    /// 3. Apply validation:
-    ///    a. If both fresh and within tolerance -> accept primary
-    ///    b. If primary stale but fallback fresh -> accept fallback
-    ///    c. If primary fresh but fallback stale -> accept primary
-    ///    d. If both stale -> error StaleReading
-    ///    e. If both fresh but exceeds tolerance -> error PriceToleranceExceeded
-    ///    f. If both unavailable -> error NoValidOraclePrice
-    pub fn get_validated_price(
-        env: Env,
-        asset: Symbol,
-        max_staleness: u64,
-    ) -> Result<OraclePriceReading, OracleAdapterError> {
-        // Check initialization
-        if !env.storage().instance().has(&symbol_short!("INIT")) {
-            return Err(OracleAdapterError::NotInitialized);
+    /// Upper bound on the caller-supplied freshness window, in seconds.
+    pub const MAX_FRESHNESS_WINDOW_SECS: u64 = 3_600;
+
+    /// Returns a price only if it was observed within `max_staleness` seconds of the
+    /// ledger time. Readings timestamped after the ledger time are never fresh.
+    pub fn get_validated_price(env: Env, asset: Symbol, max_staleness: u64) -> Result<OraclePriceReading, OracleAdapterError> {
+        if max_staleness > Self::MAX_FRESHNESS_WINDOW_SECS {
+            return Err(OracleAdapterError::InvalidFreshnessWindow);
         }
 
         let now = env.ledger().timestamp();
@@ -267,43 +239,13 @@ impl OracleAdapter {
         match (primary_price, fallback_price) {
             // Both sources available
             (Some(p1), Some(p2)) => {
-                let primary_is_fresh = now.saturating_sub(p1.timestamp) <= max_staleness;
-                let fallback_is_fresh = now.saturating_sub(p2.timestamp) <= max_staleness;
-
-                match (primary_is_fresh, fallback_is_fresh) {
-                    // Both fresh - check tolerance
-                    (true, true) => {
-                        let diff = if p1.price > p2.price {
-                            p1.price - p2.price
-                        } else {
-                            p2.price - p1.price
-                        };
-
-                        let max_diff = match Self::safe_tolerance_calc(p1.price, tolerance_bps) {
-                            Some(val) => val,
-                            None => return Err(OracleAdapterError::ArithmeticOverflow),
-                        };
-
-                        if diff <= max_diff {
-                            // Within tolerance - use primary
-                            oracle_price_validated(
-                                &env,
-                                asset,
-                                p1.price,
-                                symbol_short!("ZENITH"),
-                                Self::calc_dispersion_bps(p1.price, diff),
-                                2,
-                            );
-                            Ok(p1)
-                        } else {
-                            // Tolerance exceeded
-                            oracle_price_rejected(
-                                &env,
-                                asset,
-                                symbol_short!("ToleranceExceeded"),
-                            );
-                            Err(OracleAdapterError::PriceToleranceExceeded)
-                        }
+                let p1_fresh = Self::is_fresh(now, p1.timestamp, max_staleness);
+                let p2_fresh = Self::is_fresh(now, p2.timestamp, max_staleness);
+                if p1_fresh && p2_fresh {
+                    let diff = if p1.price > p2.price { p1.price - p2.price } else { p2.price - p1.price };
+                    let max_diff = (p1.price * tolerance_bps as i128) / 10_000;
+                    if diff > max_diff {
+                        return Err(OracleAdapterError::PriceToleranceExceeded);
                     }
                     // Primary fresh, fallback stale
                     (true, false) => {
@@ -348,47 +290,27 @@ impl OracleAdapter {
                         1,
                     );
                     Ok(p1)
-                } else {
-                    oracle_price_rejected(&env, asset, symbol_short!("StaleReading"));
-                    Err(OracleAdapterError::StaleReading)
-                }
-            }
-            // Only fallback available
-            (None, Some(p2)) => {
-                if now.saturating_sub(p2.timestamp) <= max_staleness {
-                    oracle_price_validated(
-                        &env,
-                        asset,
-                        p2.price,
-                        symbol_short!("REFLECTOR"),
-                        0,
-                        1,
-                    );
+                } else if p1_fresh {
+                    Ok(p1)
+                } else if p2_fresh {
                     Ok(p2)
                 } else {
                     oracle_price_rejected(&env, asset, symbol_short!("StaleReading"));
                     Err(OracleAdapterError::StaleReading)
                 }
             }
-            // Both unavailable
-            (None, None) => {
-                oracle_price_rejected(&env, asset, symbol_short!("NoValidOraclePrice"));
-                Err(OracleAdapterError::NoValidOraclePrice)
-            }
+            (Some(p1), None) if Self::is_fresh(now, p1.timestamp, max_staleness) => Ok(p1),
+            (None, Some(p2)) if Self::is_fresh(now, p2.timestamp, max_staleness) => Ok(p2),
+            _ => Err(OracleAdapterError::NoValidOraclePrice),
         }
     }
 
-    /// Query a single oracle source (mocked for now)
-    fn query_source(_env: &Env, key: &Symbol, _asset: &Symbol) -> Option<OraclePriceReading> {
-        // In production, this would call external oracle contracts
-        // For now, return None to indicate unavailable
-        None
+    fn is_fresh(now: u64, reading_timestamp: u64, max_staleness: u64) -> bool {
+        reading_timestamp <= now && now - reading_timestamp <= max_staleness
     }
 
-    /// Safely calculate tolerance without overflow
-    fn safe_tolerance_calc(price: i128, tolerance_bps: u32) -> Option<i128> {
-        // Check for potential overflow
-        if price.abs() > i128::MAX / 10_000 {
+    fn query_source(env: &Env, key: &Symbol, _asset: &Symbol) -> Option<OraclePriceReading> {
+        if !env.storage().instance().has(key) {
             return None;
         }
 

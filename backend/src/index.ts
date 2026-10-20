@@ -36,6 +36,10 @@ import {
 import { sorobanService } from './services/sorobanService.js';
 import { validateLoanConfigOnStartup } from './config/loanConfig.js';
 import { startLoanDueCheckCron, stopLoanDueCheckCron } from './cron/loanCheckCron.js';
+import {
+  startContractVerificationCron,
+  stopContractVerificationCron,
+} from './cron/contractVerificationJob.js';
 // Imported the score decay scheduler initialization wrapper
 import { startScoreDecayScheduler } from './cron/scoreDecayJob.js';
 import { initializePauseState } from './middleware/pauseGuard.js';
@@ -46,6 +50,11 @@ import {
 } from './services/sorobanWriteReplayProcessor.js';
 
 const port = process.env.PORT || 3001;
+
+// Termination budget shared with deployment config and the graceful-shutdown
+// runbook. Must stay in sync with terminationGracePeriodSeconds in the
+// deployment manifests so the process exits before the orchestrator SIGKILLs.
+const SHUTDOWN_GRACE_PERIOD_MS = Number(process.env.SHUTDOWN_GRACE_PERIOD_MS ?? 30000);
 
 // Maintain a mutable handle to invoke clean scheduler closures on process stops
 let scoreDecaySchedulerHandle: { stop: () => void } | null = null;
@@ -104,32 +113,54 @@ const server = app.listen(port, () => {
   // Start loan due check cron
   startLoanDueCheckCron();
 
+  // Start contract verification polling against Stellar explorer
+  startContractVerificationCron();
+
   // Wire up and activate the score decay daily scheduler loop
   scoreDecaySchedulerHandle = startScoreDecayScheduler() || null;
 });
 
+let shuttingDown = false;
+
 const shutdown = async (signal: 'SIGTERM' | 'SIGINT') => {
+  // Concurrent SIGTERM/SIGINT must not run the drain sequence twice, which
+  // could double-release leases or double-close the pool.
+  if (shuttingDown) {
+    logger.warn(`${signal} received while shutdown already in progress; ignoring.`);
+    return;
+  }
+  shuttingDown = true;
+
   logger.info(`${signal} signal received: initiating graceful shutdown`);
 
-  // Timeout (30s) force-kills if shutdown stalls
+  // Step 0: Flip readiness to not-ready so load balancers stop routing new
+  // work before we begin draining. This must happen before any other step.
+  shutdownCoordinator.beginShutdown();
+
+  // Timeout force-kills if shutdown stalls past the shared termination budget.
   const timeout = setTimeout(() => {
-    logger.error('Graceful shutdown exceeded 30s, forcing exit.');
+    logger.error(
+      `Graceful shutdown exceeded ${SHUTDOWN_GRACE_PERIOD_MS}ms, forcing exit. ` +
+        'In-flight work is left retryable; leases are released by the drain steps below.',
+    );
     process.exit(1);
-  }, 30000);
+  }, SHUTDOWN_GRACE_PERIOD_MS);
   timeout.unref();
 
   try {
-    // Step 1: Stop accepting new requests
+    // Step 1: Stop accepting new requests and drain in-flight ones
     await shutdownCoordinator.shutdown();
     logger.info('In-flight requests drained or timeout reached.');
 
-    // Step 2: Gracefully stop schedulers
+    // Step 2: Gracefully stop schedulers. Each stop() releases any held lease
+    // and checkpoints progress so a restart resumes idempotently.
     logger.info('Stopping background schedulers...');
     if (scoreDecaySchedulerHandle) {
       scoreDecaySchedulerHandle.stop();
     }
 
     stopLoanDueCheckCron();
+    stopContractVerificationCron();
     await stopIndexer();
     stopDefaultCheckerScheduler();
     stopWebhookRetryProcessor();

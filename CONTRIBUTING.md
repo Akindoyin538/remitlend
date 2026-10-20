@@ -1,74 +1,40 @@
-# Contributing to RemitLend
+# Contributing
 
-First off, thank you for considering contributing to RemitLend! It's people like you who make RemitLend a powerful tool for providing fair lending access to migrant workers worldwide.
+Thanks for contributing. This document covers the change-classification gate that
+CI applies to high-risk paths, how to satisfy it, and the clean-checkout setup
+that CI continuously verifies.
 
-This document provides a set of guidelines for contributing to RemitLend and its packages. These are mostly guidelines, not rules. Use your best judgment, and feel free to propose changes to this document in a pull request.
+## Contributor quick start (clean checkout)
 
-## 📋 Table of Contents
+CI runs the commands below on a fresh runner for every change to this guide, so
+they are guaranteed to match the package scripts and required environment. Run
+them in order from a clean checkout:
 
-- [Code of Conduct](#code-of-conduct)
-- [Development Workflow](#development-workflow)
-- [Branching Strategy](#branching-strategy)
-- [Commit Message Guidelines](#commit-message-guidelines)
-- [Pull Request Standards](#pull-request-standards)
-- [Environment Variables](#environment-variables)
-- [Testing Requirements](#testing-requirements)
-- [Style Guides](#style-guides)
+```bash
+# 1. Install dependencies (uses the committed lockfile)
+npm ci
 
-## Code of Conduct
+# 2. Environment setup — copy the example and fill in local-only values
+cp .env.example .env
 
-By participating in this project, you agree to maintain a respectful, inclusive, and harassment-free environment for everyone. We are committed to providing a welcoming experience for contributors of all backgrounds and skill levels.
+# 3. Migrations
+npm run migrate
 
-## Development Workflow
+# 4. Seed local data
+npm run seed
 
-We follow a **Feature-Branch-to-Main** workflow. All development work should happen in feature branches and be merged into `main` via Pull Requests.
-
-### Architecture & Contributor Wiki
-
-If you're new to the codebase, start with:
-- `docs/wiki/README.md` (high-level contributor wiki)
-- `ARCHITECTURE.md` (system overview)
-- `docs/deployed-contracts.md` (testnet/mainnet contract IDs and the env vars that consume them).
-
-```mermaid
-graph TD
-    Main[main branch] -->|Checkout| Feat[feat/your-feature]
-    Feat -->|Commits| Feat
-    Feat -->|Push| Remote[Remote Branch]
-    Remote -->|Open PR| PR[Pull Request]
-    PR -->|Review & CI| Merge[Merged to main]
-    Merge --> Main
+# 5. Focused test for the area you changed
+npm run test
 ```
 
-### Steps to Contribute
+Every script referenced above (`migrate`, `seed`, `test`) must exist in
+`package.json`; the docs-verification workflow fails and points at the exact
+section and command when a referenced script is missing. Required environment
+variables are checked against `.env.example`, so add new variables there when you
+introduce them.
 
-1. **Fork & Clone**: Fork the repository and clone it locally.
-2. **Branch**: Create a new branch from the latest `main`.
-3. **Develop**: Implement your changes, following code style and quality standards.
-4. **Test**: Ensure all tests pass (see [Testing Requirements](#testing-requirements)).
-5. **Commit**: Use [Conventional Commits](#commit-message-guidelines).
-6. **Push & PR**: Push your branch and open a Pull Request against `main`.
-
-## Branching Strategy
-
-Follow these naming conventions for your branches:
-
-| Type | Prefix | Example |
-| :--- | :--- | :--- |
-| **Feature** | `feat/` | `feat/lender-dashboard` |
-| **Bug Fix** | `fix/` | `fix/nft-minting-error` |
-| **Docs** | `docs/` | `docs/update-api-guide` |
-| **Refactor** | `refactor/` | `refactor/loan-logic` |
-| **Performance**| `perf/` | `perf/optimize-queries` |
-| **Maintenance**| `chore/` | `chore/update-deps` |
-
-## Commit Message Guidelines
-
-We strictly follow the [Conventional Commits](https://www.conventionalcommits.org/) specification.
-
-**Format**: `<type>(<scope>): <subject>`
-
-### Common Types:
+The workflow uses only local, non-production values. It never uses production
+secrets and never performs external value-bearing transactions.
 
 - **feat**: A new feature (corresponds to `MINOR` in Semantic Versioning).
 - **fix**: A bug fix (corresponds to `PATCH` in Semantic Versioning).
@@ -77,51 +43,130 @@ We strictly follow the [Conventional Commits](https://www.conventionalcommits.or
 - **refactor**: A code change that neither fixes a bug nor adds a feature.
 - **perf**: A code change that improves performance.
 - **test**: Adding missing tests or correcting existing tests.
-- **chore**: Changes to the build process or auxiliary tools and libraries.
+- **chore**: Changes to the build process or auxiliary tools/libraries.
 
-**Example**: `feat(contracts): add flash loan prevention to lending pool`
+CI classifies every pull request by the paths it changes. The classification is
+derived from the diff, so it cannot be bypassed by editing labels or checkboxes.
+A contributor may *refine* the classification (for example, to add a risk class
+that the path heuristic missed) by adding entries to the `risk-classes` section
+of `.ci/risk-classes.json` in the same PR. Refinement can only add required
+evidence, never remove it: the path-derived classes are always enforced.
 
-## Pull Request Standards
+| Risk class | Triggered by changed paths | Minimum evidence |
+| --- | --- | --- |
+| `money-arithmetic` | `backend/**/money*`, `backend/**/ledger*`, `backend/**/interest*`, `backend/**/fees*` | Unit tests for the arithmetic plus a property/fuzz test over the boundary (rounding, overflow, zero/negative amounts). |
+| `loan-transitions` | `backend/**/loan*`, `backend/**/state-machine*`, `backend/migrations/**` | Integration test exercising the transition, plus a property/fuzz test asserting no illegal state is reachable. |
+| `contract-authorization` | `contracts/**`, `backend/**/auth*`, `backend/**/permissions*` | Unit tests for the authorization predicate plus an E2E test for the allowed and denied paths. |
+| `indexing` | `backend/**/index*`, `backend/**/search*`, `backend/**/query*` | Integration test against the real index, plus a property/fuzz test for idempotent re-indexing. |
+| `key-custody` | `backend/**/keys*`, `backend/**/custody*`, `backend/**/signing*` | Unit tests for key handling plus an E2E test covering rotation and revocation. |
 
-When opening a PR, ensure your description includes:
-- **Linked Issue**: Close the relevant issue (e.g., `Closes #123`).
-- **Description**: A clear summary of the changes.
-- **Testing**: Evidence that the changes were tested.
-- **Checklist**:
-    - [ ] Code follows project style guides.
-    - [ ] Tests have been added/updated and pass.
-    - [ ] Documentation has been updated.
-    - [ ] Commit messages follow standards.
+## Reporting missing evidence
+
+### Contracts Change Requirements
+
+Changes under `contracts/` affect deployed, stateful on-chain code, so PRs touching them must additionally document:
+
+- **Threat model**: who can call the new/changed entry points, what they can influence, and the abuse cases considered (reentrancy, griefing, front-running, unauthorized callers).
+- **Authorization**: the exact auth checks (e.g. `require_auth`, admin/role gates) guarding each state-changing path, and the failure mode when they are not met.
+- **Compatibility impact**: whether storage keys, event shapes, or entry-point signatures change, and how existing deployed contracts, API consumers, and persisted data remain readable (or the migration path if not).
+- **Rollout & rollback**: ordered deployment steps (e.g. initialize → configure → enable) and how to safely revert if a step misbehaves.
+- **Verification evidence**: the narrowest relevant `cargo test` output plus any integration/e2e scenario exercising the full workflow.
+
+#### Liquidation & Unwind Policy
+
+When a loan becomes delinquent, contracts must resolve it through a **deterministic unwind policy** rather than ad-hoc admin action. Contributors implementing or modifying this path must ensure:
+
+- **Authorization**: only the configured liquidator role (or an authorized keeper) may trigger an unwind; unauthorized callers fail with an explicit error and emit no state change.
+- **Determinism**: the unwind outcome (collateral seizure, remaining balance, status transition) is a pure function of on-chain state — no wall-clock or off-chain inputs beyond the ledger timestamp already recorded.
+- **Bounded work**: any iteration over collateral, tranches, or schedules is capped by a configured maximum; exceeding the cap fails closed rather than looping unbounded.
+- **Idempotency & retries**: re-invoking an unwind on an already-unwound loan is a no-op or explicit error, never a double-seizure; partial failures leave state consistent for a safe retry.
+- **Observability**: emit structured events (loan id, prior status, seized amount, remaining balance, caller) and expose read-only status derived from authoritative on-chain state.
+- **Tests**: cover success, authorization failure, boundary values (zero/at-cap collateral), retry/idempotency, and stale or dependency-failure paths.
+
+#### Loan Cancellation & Expired-Request Cleanup
+
+Loan requests that are cancelled or expire before disbursement must be resolved through explicit, auditable entry points. Contributors implementing or modifying this path must ensure:
+
+- **Authorization**: cancellation is permitted only for the borrower, the assigned lender, or an admin, and only while the loan is in a pre-disbursement state (e.g. `Pending`/`Requested`). Any other caller or state fails with an explicit error and emits no state change.
+- **State guard**: cancellation is rejected once funds have been disbursed; terminal states (`Cancelled`, `Repaid`, `Liquidated`) are never re-cancelled.
+- **Expired-request cleanup**: a cleanup entry point processes requests whose deadline has passed relative to the recorded ledger timestamp. Iteration is capped by a configured maximum per invocation so a single call cannot loop unbounded; callers page through remaining requests.
+- **Idempotency & retries**: re-running cleanup over an already-cancelled/expired request is a no-op (or explicit `AlreadyTerminal` error), never a double state transition; partial progress leaves state consistent for a safe retry.
+- **Compatibility**: cancellation/cleanup must not change existing storage keys or entry-point signatures for already-deployed loans; any new keys or event shapes are additive and documented in the PR's compatibility-impact section.
+- **Observability**: emit structured events (loan id, prior status, caller, reason: `Cancelled`/`Expired`) and structured errors for `Unauthorized`, `AlreadyTerminal`, and `NotExpired` outcomes.
+- **Tests**: cover success, authorization failure, already-terminal, not-yet-expired boundary, at-cap cleanup batch, and retry/idempotency paths.
 
 ## Environment Variables
 
-Before setting up the project locally, review the full environment variable reference in [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md). Each `.env.example` file contains a pointer to this canonical reference. If you add a new environment variable, update both the relevant `.env.example` and the table in `ENVIRONMENT.md`.
+```
+[risk-gate] money-arithmetic: missing property/fuzz test
+  required: npm run test:property -- --grep "money"
+  or link a reviewed rationale in the PR description under "## Risk rationale".
+```
+
+## Contract Storage Migration Manifests
+
+Every contract version that changes persisted storage **must** ship a storage
+migration manifest. The manifest is the single source of truth for how on-chain
+state moves from the previous version to the new one, and it is reviewed as part
+of the contract PR.
+
+### What a manifest must contain
+
+- **Version identifiers**: the `from` and `to` contract versions (semver) and the
+  on-chain storage schema version each maps to.
+- **Storage layout**: every key/namespace the version reads or writes, its
+  encoding, and whether it is added, unchanged, or removed.
+- **Migration steps**: the ordered, idempotent operations that transform `from`
+  state into `to` state, one manifest per consecutive version pair.
+
+### Compatibility rules
+
+- Migrations must be **additive** by default: new keys are introduced without
+  rewriting existing entries, so deployed contracts and persisted data keep
+  working.
+- Any **breaking** change (key rename, encoding change, removal) must be called
+  out explicitly in the manifest with a documented rollback path.
+- A manifest is required for **every** contract version, including no-op
+  versions, so the version chain is never ambiguous.
+
+### Validation and resource bounds
+
+- Migrations validate preconditions before mutating state: the stored schema
+  version must match the manifest's `from` version, and the expected storage
+  shape must be present. A mismatch aborts the migration without partial writes.
+- Migration work is bounded: process a fixed maximum number of entries per
+  invocation and resume from a recorded cursor rather than looping unbounded.
+
+### Authorization, failure, and rollback
+
+- Only the contract admin (per the contract's authorization model) may trigger a
+  migration; unauthorized callers are rejected before any state is read or
+  written.
+- Migrations are idempotent and safe to retry: a failed or interrupted run
+  leaves the recorded version unchanged and can be re-invoked.
+- Stale data (a version behind the manifest's `from`) is rejected with a
+  structured error rather than silently coerced.
+- Rollback restores the previous version marker and reverses only the additive
+  steps documented in the manifest; breaking migrations must document their
+  manual rollback procedure.
+
+When you add or bump a contract version, add its manifest alongside the
+contract and reference it in the PR description under compatibility impact and
+rollout steps.
 
 ## Testing Requirements
 
-Before submitting, verify your changes by running:
+## Exemptions
 
-### Frontend (Next.js/React)
-```bash
-cd frontend
-npm run lint
-npm run test
-```
+Two narrow exemptions exist, and both are path-scoped:
 
-### Backend (Node/Express)
-```bash
-cd backend
-npm run lint
-npm run test
-```
+- **Documentation-only changes** — a PR whose diff touches only `*.md`, `docs/**`,
+  or `LICENSE` is exempt from the gate.
+- **Generated changes** — a PR whose diff touches only files marked generated
+  (for example `**/*.generated.*`, `**/dist/**`, lockfiles) is exempt.
 
-### Contracts (Soroban/Rust)
-```bash
-cd contracts
-cargo fmt --check
-cargo clippy
-cargo test
-```
+A PR that mixes an exempt path with a risk-class path is *not* exempt; the risk
+class applies to the whole PR.
 
 ### Smart Contracts Fuzzing (Soroban)
 For consensus-critical changes to smart contracts, fuzz testing is an expected part of the workflow.
@@ -195,40 +240,4 @@ suite and runs in CI.
   retried.
 - Stale or unavailable data (dependency failure) and authorization failure
   states.
-- Boundary values: zero, minimum, and maximum representable amounts.
-
-**Rules for visual regression tests:**
-
-- Derive every displayed amount, status, and chain state from the same
-  authoritative source the app uses at runtime (API/contract responses or the
-  shared financial formatting utilities). **Never hard-code or mock financial
-  arithmetic in a story or snapshot** — a mocked number can silently diverge
-  from production.
-- Cover the success path plus the failure paths listed above (authorization
-  failure, boundary values, retries, stale data, dependency failure) for each
-  critical financial surface you touch.
-- Keep snapshots deterministic: pin the viewport, freeze time and locale, and
-  disable animations (`prefers-reduced-motion`) so diffs reflect real changes
-  only.
-- When a visual change is intentional, update the baseline in the same PR and
-  call it out in the PR description with before/after images.
-
-**Running locally:**
-
-```bash
-cd frontend
-npm run build
-npx playwright test e2e/visual --project=chromium --update-snapshots
-```
-
-Omit `--update-snapshots` to verify against the committed baselines the way CI
-does. New critical financial surfaces must add their route/state to the visual
-regression suite in the same PR that introduces them.
-
-## Style Guides
-
-- **TypeScript**: Use functional components and hooks. Prefer `interface` over `type`. Ensure strict typing.
-- **Rust**: Follow standard Rust naming conventions and maintain idiomatic code.
-
----
-Thank you for contributing to RemitLend! 🚀
+- Boundary value
