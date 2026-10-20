@@ -161,7 +161,8 @@ const corsOptions: cors.CorsOptions = {
 app.use(cors(corsOptions));
 app.use(compression());
 // Explicit request body size limit set to 100kb to mitigate payload-based DoS and unbounded audit log writes.
-app.use(express.json({ limit: '100kb' }));
+// CSP reports (report-uri) arrive as `application/csp-report`, not plain JSON, so accept that type too.
+app.use(express.json({ limit: '100kb', type: ['application/json', 'application/csp-report'] }));
 app.use(globalRateLimiter);
 app.use(requestIdMiddleware);
 // Trace context (#414): resolves/creates the W3C `traceparent` for the request
