@@ -4,6 +4,92 @@
 
 This document describes the high-level architecture of the frontend application, its boundaries, and the operational contracts it must uphold.
 
+## Package Boundaries
+
+This repository is a monorepo with four top-level package groups. Each group owns a
+narrow responsibility and may only import from the groups listed as allowed below.
+Imports that cross a prohibited edge are rejected in CI (see
+[Dependency Enforcement](#dependency-enforcement)).
+
+| Package group | Owns | May import from |
+| --- | --- | --- |
+| `frontend/` | Presentation, routing, client-side state, offline behavior | `contracts/` (generated types only) |
+| `backend/` | API implementation, persistence, chain interaction | `contracts/` (generated types only) |
+| `contracts/` | Canonical API schemas, generated types, money policy | nothing in `frontend/`, `backend/`, or `scripts/` |
+| `scripts/` | Build, codegen, and CI tooling | `contracts/` (generated types only) |
+
+### Allowed Imports
+
+- `frontend/` → `contracts/` generated artifacts (e.g. `contracts/generated/*`).
+- `backend/` → `contracts/` generated artifacts.
+- `scripts/` → `contracts/` generated artifacts.
+- Any package → its own internal modules.
+
+### Prohibited Imports
+
+- `frontend/` → `backend/` (no direct API implementation coupling).
+- `backend/` → `frontend/` (no presentation coupling).
+- `contracts/` → `frontend/`, `backend/`, or `scripts/` (contracts must stay dependency-free).
+- `scripts/` → `frontend/` or `backend/` (tooling must not depend on app internals).
+- Any package importing a hand-copied definition of a shared API or money type
+  instead of the canonical artifact in `contracts/`.
+
+### Dependency Cycles
+
+Cycles between package groups are prohibited. Cycles within a single package are
+reported as warnings and tracked as exceptions until resolved.
+
+## Dependency Enforcement
+
+CI runs an import-boundary check that:
+
+1. Parses import statements across `frontend/`, `backend/`, `contracts/`, and `scripts/`.
+2. Rejects any import matching a prohibited edge above.
+3. Builds the package-group import graph and fails on any cycle.
+4. Fails when a shared API or money type is defined outside `contracts/` and
+   imported from more than one package group.
+
+The check runs on every pull request and blocks merge on failure. New prohibited
+imports cannot land without an explicit, reviewed exception.
+
+## Shared Contracts and Money Policy
+
+- API request/response types are generated from the canonical schemas in
+  `contracts/` and consumed from the generated artifacts. They are never copied
+  into `frontend/` or `backend/`.
+- Money policy (minor-unit representation, rounding, and rate units) is owned by
+  `contracts/`. Consumers import the canonical money types rather than
+  re-declaring them.
+- The frontend's loan cost disclosure engine remains the single borrower-facing
+  computation surface, but its money types come from `contracts/`.
+
+## Boundary Exceptions
+
+Intentional exceptions to the rules above are inventoried here. Each exception
+has an owner and a removal condition; an exception without both is not valid and
+must be rejected in review.
+
+| Exception | Owner | Removal condition |
+| --- | --- | --- |
+| _None currently recorded._ | — | — |
+
+When adding an exception, append a row with the exact import path, the owning
+team, and the concrete condition under which the exception will be removed.
+
+## Changing a Cross-Package Contract
+
+To safely change a contract that crosses package boundaries:
+
+1. Update the canonical schema or money type in `contracts/` first.
+2. Regenerate the shared artifacts so `frontend/`, `backend/`, and `scripts/`
+   consume the new definitions.
+3. Update consumers in the same change; do not leave a copied definition behind.
+4. Run the dependency-boundary check locally; a new prohibited import or cycle
+   fails the build.
+5. If a temporary exception is unavoidable, record it in
+   [Boundary Exceptions](#boundary-exceptions) with an owner and a removal
+   condition before merging.
+
 ## Frontend Boundary
 
 The frontend is a single-page application responsible for:

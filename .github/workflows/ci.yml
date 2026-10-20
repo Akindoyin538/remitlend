@@ -12,6 +12,7 @@
 #                                       └──► scripts-typecheck
 #                       ──► migration-check (path-filtered)
 #                       ──► contracts ──► contract-compatibility (#407)
+#   boundary-check (#580) ──► backend / frontend / contracts / scripts-typecheck
 # ─────────────────────────────────────────────────────────────────────────────
 name: RemitLend CI
 
@@ -31,8 +32,26 @@ on:
 permissions: {}
 
 jobs:
+  # ── 0. Architecture boundary check (issue #580) ─────────────────────────────
+  # Enforces the allowed/prohibited import map between frontend, backend,
+  # contracts, and scripts, and rejects dependency cycles. Runs first so a
+  # boundary violation fails fast before the heavier build/test jobs.
+  boundary-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - name: Enforce package dependency boundaries
+        run: node scripts/check-dependency-boundaries.mjs
+
   # ── 1. Supply-chain audit ───────────────────────────────────────────────────
   supply-chain-audit:
+    needs: boundary-check
     uses: ./.github/workflows/reusable-supply-chain-audit.yml
     permissions:
       contents: read
