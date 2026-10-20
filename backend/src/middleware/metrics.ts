@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import client from 'prom-client';
 import { query } from '../db/connection.js';
+import type { AdaptiveScheduler, SchedulerMode } from '../services/adaptiveScheduler.js';
 import logger from '../utils/logger.js';
 
 export const metricsRegistry = new client.Registry();
@@ -131,6 +132,138 @@ export const transactionProcessingTimeHistogram = new client.Histogram({
   buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [metricsRegistry],
 });
+
+// ---------------------------------------------------------------------------
+// Adaptive scheduler metrics
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps SchedulerMode string values to numeric gauge values following the
+ * convention documented in indexer_scheduler_mode help text:
+ *   0 = caught_up, 1 = behind, 2 = catch_up
+ */
+const SCHEDULER_MODE_VALUE: Record<SchedulerMode, number> = {
+  caught_up: 0,
+  behind: 1,
+  catch_up: 2,
+};
+
+/**
+ * Current operating mode of the adaptive scheduler.
+ * Values: 0=caught_up, 1=behind, 2=catch_up
+ */
+export const indexerSchedulerModeGauge = new client.Gauge({
+  name: 'indexer_scheduler_mode',
+  help: 'Current operating mode of the adaptive scheduler (0=caught_up, 1=behind, 2=catch_up).',
+  labelNames: ['contract_id'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Current exponential-backoff level (0 = no backoff; increments by 1 per
+ * consecutive RPC failure, reset to 0 on success).
+ */
+export const indexerBackoffLevelGauge = new client.Gauge({
+  name: 'indexer_backoff_level',
+  help: 'Current exponential-backoff level for the adaptive scheduler (0 = no backoff, N = Nth failure tier).',
+  labelNames: ['contract_id'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Number of consecutive RPC failures since the last successful poll.
+ */
+export const indexerConsecutiveFailuresGauge = new client.Gauge({
+  name: 'indexer_consecutive_failures',
+  help: 'Number of consecutive RPC failures recorded by the adaptive scheduler since the last successful poll.',
+  labelNames: ['contract_id'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Total number of scheduler mode transitions.
+ * Label `from` and `to` carry the originating and destination mode names.
+ */
+export const indexerModeTransitionsCounter = new client.Counter({
+  name: 'indexer_mode_transitions_total',
+  help: 'Total number of adaptive-scheduler mode transitions.',
+  labelNames: ['from', 'to'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * Total number of times exponential backoff was triggered (i.e. the
+ * consecutive-failure counter was incremented from 0→1 or higher).
+ */
+export const indexerBackoffTriggeredCounter = new client.Counter({
+  name: 'indexer_backoff_triggered_total',
+  help: 'Total number of times the adaptive-scheduler backoff was triggered by an RPC failure.',
+  labelNames: ['contract_id'] as const,
+  registers: [metricsRegistry],
+});
+
+// ---------------------------------------------------------------------------
+// Adaptive scheduler export helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the in-memory state of `scheduler` and push it to the three adaptive
+ * scheduler gauges.  Call this after every successful or failed poll cycle.
+ *
+ * NOTE: This deliberately uses the synchronous in-memory view of the
+ * scheduler (via getState()) rather than hitting the DB, so it is safe to
+ * call in hot polling loops without adding extra I/O.
+ *
+ * @param scheduler  The AdaptiveScheduler instance to inspect.
+ * @param contractId The contract ID label to attach to the metrics.
+ */
+export async function exportAdaptiveSchedulerMetrics(
+  scheduler: AdaptiveScheduler,
+  contractId: string,
+): Promise<void> {
+  try {
+    const state = await scheduler.getState();
+
+    indexerSchedulerModeGauge.set(
+      { contract_id: contractId },
+      SCHEDULER_MODE_VALUE[state.mode] ?? 0,
+    );
+
+    indexerBackoffLevelGauge.set(
+      { contract_id: contractId },
+      state.consecutiveFailures,
+    );
+
+    indexerConsecutiveFailuresGauge.set(
+      { contract_id: contractId },
+      state.consecutiveFailures,
+    );
+  } catch (error) {
+    logger.warn('Failed to export adaptive scheduler metrics', { contractId, error });
+  }
+}
+
+/**
+ * Record a scheduler mode transition in the counter.
+ * Intended to be called from AdaptiveScheduler.recordModeTransition (or the
+ * caller of calculateNextPoll) whenever a transition is detected.
+ *
+ * @param from  The previous SchedulerMode.
+ * @param to    The new SchedulerMode.
+ */
+export function recordSchedulerModeTransition(from: SchedulerMode, to: SchedulerMode): void {
+  indexerModeTransitionsCounter.inc({ from, to });
+}
+
+/**
+ * Record that backoff was triggered (a new RPC failure incremented the
+ * consecutive-failure counter).
+ *
+ * @param contractId The contract ID label.
+ */
+export function recordBackoffTriggered(contractId: string): void {
+  indexerBackoffTriggeredCounter.inc({ contract_id: contractId });
+}
 
 function routeLabel(req: Request): string {
   const routePath = req.route?.path;

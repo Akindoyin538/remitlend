@@ -99,6 +99,9 @@ stricter rate limit (10 requests/minute/IP) to prevent abuse.
 | `JWT_COOKIE_NAME` | ✓ | ✓ | ✓ | `remitlend_jwt` | Name of the HTTP cookie used to transport the JWT token | `backend/src/middleware/jwtAuth.ts` |
 | `WEBHOOK_REQUEST_TIMEOUT_MS` | ✓ | ✓ | ✓ | `30000` | Outgoing webhook request timeout | `backend/src/services/webhookService.ts` |
 | `SENTRY_DSN` | — | ✓ | ✓ | — | Sentry DSN for backend error tracking | `backend/src/app.ts` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ✓ | ✓ | ✓ | — | Base URL of an OTLP/HTTP collector (Jaeger, Tempo, OTel Collector). Unset disables trace export. Spans are exported through Sentry's OpenTelemetry provider. | `backend/src/config/tracing.ts` |
+| `OTEL_SERVICE_NAME` | ✓ | ✓ | ✓ | — | `service.name` reported on exported spans | `backend/src/config/tracing.ts` |
+| `OTEL_TRACES_SAMPLE_RATE` | ✓ | ✓ | ✓ | `0.2` (prod) / `1` (other) | Fraction of traces sampled (0..1); invalid values fall back to the default | `backend/src/config/tracing.ts` |
 | `NOTIFICATION_RETENTION_DAYS` | ✓ | ✓ | ✓ | `90` | Days to keep unread notifications | `backend/src/services/notificationService.ts` |
 | `READ_NOTIFICATION_RETENTION_DAYS` | ✓ | ✓ | ✓ | `30` | Days to keep read notifications | `backend/src/services/notificationService.ts` |
 | `SENDGRID_API_KEY` | — | ✓ | ✓ | — | SendGrid API key for email | `backend/src/services/emailService.ts` |
@@ -108,6 +111,10 @@ stricter rate limit (10 requests/minute/IP) to prevent abuse.
 | `TWILIO_ACCOUNT_SID` | — | ✓ | ✓ | — | Twilio account SID for SMS | `backend/src/services/smsService.ts` |
 | `TWILIO_AUTH_TOKEN` | — | ✓ | ✓ | — | Twilio auth token | `backend/src/services/smsService.ts` |
 | `TWILIO_PHONE_NUMBER` | — | ✓ | ✓ | — | Twilio sender phone number | `backend/src/services/smsService.ts` |
+| `PII_KEK_ID` | ✓ | ✓ | ✓ | `default-kek` | Key Encryption Key (KEK) ID in KMS. Used to wrap/unwrap Data Encryption Keys (DEKs) for PII field encryption. When rotating keys, update this to the new KEK ID. | `backend/src/services/piiCrypto.ts`, `backend/src/services/keyRotationService.ts` |
+| `PII_KEK_KEY` | ✓ | ✓ | ✓ | `0` (32 zeros) | Local KEK key (hex-encoded 256-bit) when `PII_KMS_ENDPOINT` is not set. In production, use an external KMS. | `backend/src/services/piiCrypto.ts` |
+| `PII_KMS_ENDPOINT` | — | ✓ | ✓ | — | HTTP endpoint for KMS key wrapping/unwrapping operations (e.g., `https://kms.example.com`). When set, the service uses this endpoint; otherwise, local encryption using `PII_KEK_KEY` is used. Must be HTTPS in production. | `backend/src/services/piiCrypto.ts`, `backend/src/services/keyRotationService.ts` |
+| `PII_KMS_REGION` | — | ✓ | ✓ | — | AWS region for KMS endpoint (used only if `PII_KMS_ENDPOINT` points to AWS KMS). | `backend/src/services/piiCrypto.ts` |
 
 ---
 
