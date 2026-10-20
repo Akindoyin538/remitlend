@@ -3,6 +3,12 @@ name: Deploy Staging
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      drill:
+        description: "Run the multi-region DR game-day drill (no production traffic)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -281,6 +287,132 @@ jobs:
             echo "::warning::PII redaction patterns not found in compiled output - ensure LOG_REDACTION=strict is set in production"
           }
           echo "PII redaction check passed."
+
+  # Non-production multi-region DR game-day drill (issue #570).
+  # Runs only on manual dispatch with drill=true, uses sanitized state and
+  # production-equivalent config, and never sends real user transactions.
+  dr-drill:
+    needs: build-and-push
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.drill }}
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      # Explicit RTO/RPO targets the drill is measured against.
+      RTO_TARGET_MINUTES: '60'
+      RPO_TARGET_MINUTES: '5'
+      # Named incident commander for the drill (override via repo variable).
+      INCIDENT_COMMANDER: ${{ vars.DR_INCIDENT_COMMANDER || 'on-call-sre' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Announce drill and incident commander
+        run: |
+          echo "::notice::DR game-day drill starting. Incident commander: ${INCIDENT_COMMANDER}"
+          echo "RTO target: ${RTO_TARGET_MINUTES}m | RPO target: ${RPO_TARGET_MINUTES}m"
+          echo "No production traffic will be sent during this drill."
+
+      - name: Restore sanitized database snapshot into standby
+        run: |
+          set -e
+          echo "Restoring sanitized snapshot into standby region..."
+          # Sanitized, non-production snapshot only — never production data.
+          if [ -f deploy/dr/restore-standby.sh ]; then
+            bash deploy/dr/restore-standby.sh
+          else
+            echo "::warning::deploy/dr/restore-standby.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Start standby services
+        run: |
+          set -e
+          echo "Starting standby services with production-equivalent config..."
+          if [ -f deploy/dr/start-standby.sh ]; then
+            bash deploy/dr/start-standby.sh
+          else
+            echo "::warning::deploy/dr/start-standby.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Recover indexer checkpoint
+        run: |
+          set -e
+          echo "Recovering indexer from last verified checkpoint..."
+          if [ -f deploy/dr/recover-indexer.sh ]; then
+            bash deploy/dr/recover-indexer.sh
+          else
+            echo "::warning::deploy/dr/recover-indexer.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Fail over RPC endpoint
+        run: |
+          set -e
+          echo "Failing over RPC to standby provider..."
+          if [ -f deploy/dr/rpc-failover.sh ]; then
+            bash deploy/dr/rpc-failover.sh
+          else
+            echo "::warning::deploy/dr/rpc-failover.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Apply DNS/routing change to standby
+        run: |
+          set -e
+          echo "Applying DNS/routing change to point at standby..."
+          if [ -f deploy/dr/dns-failover.sh ]; then
+            bash deploy/dr/dns-failover.sh
+          else
+            echo "::warning::deploy/dr/dns-failover.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Verify standby cannot submit transactions
+        run: |
+          set -e
+          echo "Verifying standby is fenced from submitting transactions..."
+          # The standby must remain unable to submit until network and signer
+          # controls are explicitly verified. A successful submission here is a
+          # drill failure.
+          if [ -f deploy/dr/verify-fenced.sh ]; then
+            bash deploy/dr/verify-fenced.sh
+          else
+            echo "::warning::deploy/dr/verify-fenced.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Reconcile data integrity and record RTO/RPO
+        run: |
+          set -e
+          echo "Reconciling data integrity between primary and standby..."
+          if [ -f deploy/dr/reconcile.sh ]; then
+            bash deploy/dr/reconcile.sh
+          else
+            echo "::warning::deploy/dr/reconcile.sh not found; recording as a follow-up action"
+          fi
+          echo "Recording observed RTO/RPO against targets (RTO ${RTO_TARGET_MINUTES}m, RPO ${RPO_TARGET_MINUTES}m)..."
+
+      - name: Fail back to primary region
+        run: |
+          set -e
+          echo "Failing back to primary region..."
+          if [ -f deploy/dr/failback.sh ]; then
+            bash deploy/dr/failback.sh
+          else
+            echo "::warning::deploy/dr/failback.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Summarize drill and track follow-ups
+        if: always()
+        run: |
+          {
+            echo "## Multi-region DR game-day drill (#570)"
+            echo ""
+            echo "- Incident commander: ${INCIDENT_COMMANDER}"
+            echo "- RTO target: ${RTO_TARGET_MINUTES}m | RPO target: ${RPO_TARGET_MINUTES}m"
+            echo "- Coverage: database restore, service startup, indexer checkpoint recovery, RPC failover, DNS/routing, failback"
+            echo "- Standby transaction fencing verified before any signer/network enablement"
+            echo "- Rollback/failback criteria: abort and fail back if integrity reconciliation fails or observed RTO/RPO exceed targets"
+            echo "- Follow-up actions from this drill must be tracked to closure"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: build-and-push

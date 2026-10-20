@@ -137,6 +137,9 @@ be deployed against a contract version listed as compatible for it.
   non-identifying support code (failure category, truncated transaction hash,
   attempt counter) so a support ticket can be correlated without exposing user
   data.
+- Journey SLIs are recorded per stage (submission, finality, projection lag) with
+  low-cardinality labels, and dependency failures are recorded separately from
+  application failures.
 
 ## Testing
 

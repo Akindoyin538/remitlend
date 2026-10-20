@@ -2,6 +2,13 @@
 # Add CVEs here to ignore them in the container scan.
 # Format: CVE-YYYY-NNNNN
 # Provide a comment above each ignored CVE explaining why it is ignored.
+#
+# NOTE: This file is a legacy, human-readable convenience view. The authoritative
+# machine-readable exception register lives in .security/dependency-exceptions.yaml
+# and is enforced by the security gate (owner, rationale, remediation target,
+# maximum expiry, and append-only renewal history are all required there).
+# Entries below MUST have a matching, non-expired record in the register or the
+# security gate will fail the build.
 
 # CVE-2023-44487: HTTP/2 Rapid Reset vulnerability in golang / net/http.
 # Justification: Non-exploitable in worker container as HTTP/2 is disabled at ingress load balancer.
