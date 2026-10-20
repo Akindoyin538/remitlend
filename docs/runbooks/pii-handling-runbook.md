@@ -37,20 +37,98 @@ KMS (external)
 
 The DEK is re-wrapped by the KEK each time a field is encrypted. The plaintext DEK is never persisted.
 
-### Key rotation
+### Key rotation (Operator Guide)
 
-1. Generate a new KEK version in KMS.
-2. Set `PII_KEK_ID` to the new key ARN/ID in the backend environment.
-3. Re-encrypt all encrypted fields by running the re-encryption migration:
+RemitLend provides a production-ready key rotation service that handles re-encryption of all PII fields with exponential backoff retry logic and resumable checkpoints.
+
+#### Prerequisites
+
+- [ ] New KEK provisioned in KMS and tested for access
+- [ ] Operator has access to `admin:all` scope (deploy with updated JWT or API key)
+- [ ] Rotation window scheduled outside peak traffic
+- [ ] On-call team notified; rollback contact identified
+
+#### Steps
+
+1. **Generate a new KEK version in KMS.** Example (AWS):
    ```bash
-   cd backend
-   PII_KEK_ID=<new-key-id> npx ts-node src/scripts/rotate-pii-keys.ts
+   aws kms create-key --description "RemitLend PII KEK v2" --region us-east-1
+   # Output: new KEK ARN, e.g., arn:aws:kms:us-east-1:123456789:key/12345678-abcd-...
    ```
-   This script reads each encrypted field, decrypts with the old KEK version, and re-encrypts with the new version.
-4. Verify a sample of records by calling `decryptField()` on them after the rotation.
-5. Revoke the old KEK version in KMS only after confirming all records have been rotated.
 
-> Do not revoke the old KEK version before step 4 — if the rotation script fails partway through, you need the old key to decrypt un-rotated records.
+2. **Start key rotation:**
+   ```bash
+   curl -X POST http://api.example.com/admin/key-rotation/start \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"new_kek_id":"arn:aws:kms:us-east-1:123456789:key/..."}'
+   ```
+   Response includes `batch_id`.
+
+3. **Monitor progress:**
+   ```bash
+   curl http://api.example.com/admin/key-rotation/batch/<batch-id> \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+   Check `status`, `total_records_rotated`, `total_records_failed`.
+
+4. **Verify rotation (after all records rotated):**
+   ```bash
+   curl -X POST http://api.example.com/admin/key-rotation/batch/<batch-id>/verify \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+   This spot-checks 50 records to confirm decryption works.
+
+5. **Complete rotation:**
+   ```bash
+   curl -X POST http://api.example.com/admin/key-rotation/batch/<batch-id>/complete \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+
+6. **Update environment (for new encryptions to use new KEK):**
+   ```bash
+   # Update deployment to use new PII_KEK_ID
+   kubectl set env deployment/backend PII_KEK_ID=<new-kek-id>
+   # OR edit your env files and redeploy
+   ```
+
+7. **Revoke old KEK (wait 24 hours as safety buffer):**
+   ```bash
+   # After 24 hours, revoke old KEK in KMS admin console
+   aws kms schedule-key-deletion --key-id <old-kek-id> --pending-window-in-days 7
+   ```
+
+> **Important:** Do not revoke the old KEK until rotation is 100% complete and verified. If rotation fails partway through, you need the old key to decrypt un-rotated records.
+
+#### If rotation fails
+
+1. **Identify the issue** in batch logs:
+   ```bash
+   curl http://api.example.com/admin/key-rotation/batch/<batch-id> \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+
+2. **Fix the underlying issue** (e.g., restore KMS access, upgrade backend):
+   ```bash
+   # Example: KMS endpoint was unreachable
+   # → Fix network routing or credential expiry
+   # → Redeploy backend
+   ```
+
+3. **Resume rotation** from checkpoint:
+   ```bash
+   curl -X POST http://api.example.com/admin/key-rotation/batch/<batch-id>/resume \
+     -H "Authorization: Bearer $ADMIN_TOKEN"
+   ```
+
+4. **If unrecoverable, rollback:**
+   ```bash
+   curl -X POST http://api.example.com/admin/key-rotation/batch/<batch-id>/rollback \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d '{"reason":"KMS endpoint unreachable for 30min; rolling back to allow manual investigation"}'
+   ```
+
+See [Threat Model & Architecture: PII Key Rotation](../THREAT_MODEL_PII_KEY_ROTATION.md) for detailed threat model, failure modes, and recovery strategies.
 
 ---
 

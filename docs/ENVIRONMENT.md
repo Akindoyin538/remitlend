@@ -111,6 +111,10 @@ stricter rate limit (10 requests/minute/IP) to prevent abuse.
 | `TWILIO_ACCOUNT_SID` | — | ✓ | ✓ | — | Twilio account SID for SMS | `backend/src/services/smsService.ts` |
 | `TWILIO_AUTH_TOKEN` | — | ✓ | ✓ | — | Twilio auth token | `backend/src/services/smsService.ts` |
 | `TWILIO_PHONE_NUMBER` | — | ✓ | ✓ | — | Twilio sender phone number | `backend/src/services/smsService.ts` |
+| `PII_KEK_ID` | ✓ | ✓ | ✓ | `default-kek` | Key Encryption Key (KEK) ID in KMS. Used to wrap/unwrap Data Encryption Keys (DEKs) for PII field encryption. When rotating keys, update this to the new KEK ID. | `backend/src/services/piiCrypto.ts`, `backend/src/services/keyRotationService.ts` |
+| `PII_KEK_KEY` | ✓ | ✓ | ✓ | `0` (32 zeros) | Local KEK key (hex-encoded 256-bit) when `PII_KMS_ENDPOINT` is not set. In production, use an external KMS. | `backend/src/services/piiCrypto.ts` |
+| `PII_KMS_ENDPOINT` | — | ✓ | ✓ | — | HTTP endpoint for KMS key wrapping/unwrapping operations (e.g., `https://kms.example.com`). When set, the service uses this endpoint; otherwise, local encryption using `PII_KEK_KEY` is used. Must be HTTPS in production. | `backend/src/services/piiCrypto.ts`, `backend/src/services/keyRotationService.ts` |
+| `PII_KMS_REGION` | — | ✓ | ✓ | — | AWS region for KMS endpoint (used only if `PII_KMS_ENDPOINT` points to AWS KMS). | `backend/src/services/piiCrypto.ts` |
 
 ---
 
