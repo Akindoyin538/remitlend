@@ -1,5 +1,15 @@
 node_modules
 dist
 .env
+.env.*
 *.log
 .DS_Store
+.git
+.gitignore
+Dockerfile*
+docker-compose*.yml
+coverage
+.nyc_output
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*

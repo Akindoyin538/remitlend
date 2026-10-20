@@ -42,6 +42,19 @@ export const up = (pgm) => {
   pgm.createIndex('loan_history', 'borrower_public_key');
   pgm.createIndex('loan_history', 'lender_public_key');
   pgm.createIndex('loan_history', 'status');
+
+  // Bounded score-history pagination: deterministic keyset ordering on
+  // (created_at, id) so cursors are stable and page reads stay index-backed.
+  // Additive only — no schema-breaking changes to persisted data.
+  pgm.createIndex('loan_history', ['created_at', 'id'], {
+    name: 'loan_history_created_at_id_idx',
+  });
+  pgm.createIndex('loan_history', ['borrower_public_key', 'created_at', 'id'], {
+    name: 'loan_history_borrower_created_at_id_idx',
+  });
+  pgm.createIndex('loan_history', ['lender_public_key', 'created_at', 'id'], {
+    name: 'loan_history_lender_created_at_id_idx',
+  });
 };
 
 /**
@@ -50,5 +63,14 @@ export const up = (pgm) => {
  * @returns {Promise<void> | void}
  */
 export const down = (pgm) => {
+  pgm.dropIndex('loan_history', ['lender_public_key', 'created_at', 'id'], {
+    name: 'loan_history_lender_created_at_id_idx',
+  });
+  pgm.dropIndex('loan_history', ['borrower_public_key', 'created_at', 'id'], {
+    name: 'loan_history_borrower_created_at_id_idx',
+  });
+  pgm.dropIndex('loan_history', ['created_at', 'id'], {
+    name: 'loan_history_created_at_id_idx',
+  });
   pgm.dropTable('loan_history');
 };

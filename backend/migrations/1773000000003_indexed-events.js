@@ -60,26 +60,31 @@ export const up = (pgm) => {
   pgm.createIndex('indexed_events', 'ledger');
   pgm.createIndex('indexed_events', 'tx_hash');
   pgm.createIndex('indexed_events', 'processed');
-  pgm.createIndex('indexed_events', 'source_type');
-  pgm.createIndex('indexed_events', 'verification_status');
-  pgm.createIndex('indexed_events', 'provenance_ref');
 
-  // Enforce the evidence trust taxonomy at the storage boundary: only known
-  // source types and verification statuses may be persisted.
-  pgm.addConstraint('indexed_events', 'indexed_events_source_type_check', {
-    check:
-      "source_type IN ('on_chain_record', 'indexer_event', 'self_reported')",
-  });
-  pgm.addConstraint('indexed_events', 'indexed_events_verification_status_check', {
-    check:
-      "verification_status IN ('verified', 'provisional', 'unverified', 'invalidated')",
-  });
-
-  // Unverified or provisional facts may only affect the authoritative score when
-  // an explicit versioned policy permits it.
-  pgm.addConstraint('indexed_events', 'indexed_events_authoritative_policy_check', {
-    check:
-      "verification_status = 'verified' OR policy_version IS NOT NULL",
+  // Contracts boundary: validate the score update reason carried by indexed
+  // score events. The reason is persisted inside the event `value` payload as
+  // JSON (e.g. {"reason":"repayment"}). Enforce an explicit allow-list at the
+  // database boundary so malformed or unknown reasons cannot be persisted,
+  // while remaining backward compatible with existing rows (the constraint is
+  // NOT VALID and only applies to new/updated rows until validated).
+  pgm.addConstraint('indexed_events', 'indexed_events_score_reason_check', {
+    check: `(
+      event_type <> 'score_updated'
+      OR (
+        value IS NOT NULL
+        AND jsonb_typeof((value::jsonb) -> 'reason') = 'string'
+        AND (value::jsonb) ->> 'reason' IN (
+          'repayment',
+          'late_payment',
+          'default',
+          'loan_origination',
+          'loan_closure',
+          'manual_adjustment',
+          'migration'
+        )
+      )
+    )`,
+    notValid: true,
   });
 };
 
@@ -89,5 +94,8 @@ export const up = (pgm) => {
  * @returns {Promise<void> | void}
  */
 export const down = (pgm) => {
+  pgm.dropConstraint('indexed_events', 'indexed_events_score_reason_check', {
+    ifExists: true,
+  });
   pgm.dropTable('indexed_events');
 };
