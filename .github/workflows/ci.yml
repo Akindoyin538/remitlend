@@ -20,6 +20,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Issue #574: run the broader dependency-failure matrix on a scheduled
+    # cadence (nightly) in addition to the focused subset on every change.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 # Deny all permissions at the root level; individual reusable workflows
 # declare only what they need (all are contents: read only).
@@ -45,6 +50,51 @@ jobs:
     uses: ./.github/workflows/reusable-backend.yml
     permissions:
       contents: read
+
+  # ── 3b. Dependency-failure fault-injection suite (issue #574) ───────────────
+  # Deterministic, bounded, offline fault-injection tests for RPC, PostgreSQL,
+  # and Redis outages (isolated and combined) with recovery convergence.
+  #
+  # Focused subset runs on every change; the broader matrix runs on the
+  # scheduled cadence (and on manual dispatch).
+  dependency-failure:
+    needs: [supply-chain-audit, money-policy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Focused subset: one representative scenario per dependency plus the
+        # combined outage, kept small so it stays fast on every change.
+        scenario: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && fromJSON('["rpc","postgres","redis","combined","rpc-recovery","postgres-recovery","redis-recovery","combined-recovery","retry-budget","circuit-state","stale-read","queue-growth"]') || fromJSON('["rpc","postgres","redis","combined"]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+      - name: Run dependency-failure fault-injection suite
+        # The suite uses in-process test adapters / a local integration
+        # environment only — no public network access is required.
+        env:
+          DEPENDENCY_FAILURE_SCENARIO: ${{ matrix.scenario }}
+          DEPENDENCY_FAILURE_OFFLINE: '1'
+        run: npm run test:dependency-failure -- --scenario "$DEPENDENCY_FAILURE_SCENARIO"
+        working-directory: backend
+      - name: Upload fault-injection logs and metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-failure-${{ matrix.scenario }}
+          path: backend/test-results/dependency-failure/${{ matrix.scenario }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── 4. Migration path filter ─────────────────────────────────────────────────
   # Checks whether backend/migrations/** or backend/package.json changed.
