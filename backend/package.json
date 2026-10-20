@@ -33,6 +33,9 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.223.0",
+    "@opentelemetry/sdk-trace-base": "^2.12.0",
     "@sendgrid/mail": "^8.1.6",
     "@sentry/node": "^10.45.0",
     "@stellar/stellar-sdk": "^14.5.0",

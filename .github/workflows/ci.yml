@@ -21,6 +21,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Issue #574: run the broader dependency-failure matrix on a scheduled
+    # cadence (nightly) in addition to the focused subset on every change.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 # Deny all permissions at the root level; individual reusable workflows
 # declare only what they need (all are contents: read only).
@@ -64,6 +69,51 @@ jobs:
     uses: ./.github/workflows/reusable-backend.yml
     permissions:
       contents: read
+
+  # ── 3b. Dependency-failure fault-injection suite (issue #574) ───────────────
+  # Deterministic, bounded, offline fault-injection tests for RPC, PostgreSQL,
+  # and Redis outages (isolated and combined) with recovery convergence.
+  #
+  # Focused subset runs on every change; the broader matrix runs on the
+  # scheduled cadence (and on manual dispatch).
+  dependency-failure:
+    needs: [supply-chain-audit, money-policy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Focused subset: one representative scenario per dependency plus the
+        # combined outage, kept small so it stays fast on every change.
+        scenario: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && fromJSON('["rpc","postgres","redis","combined","rpc-recovery","postgres-recovery","redis-recovery","combined-recovery","retry-budget","circuit-state","stale-read","queue-growth"]') || fromJSON('["rpc","postgres","redis","combined"]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+      - name: Run dependency-failure fault-injection suite
+        # The suite uses in-process test adapters / a local integration
+        # environment only — no public network access is required.
+        env:
+          DEPENDENCY_FAILURE_SCENARIO: ${{ matrix.scenario }}
+          DEPENDENCY_FAILURE_OFFLINE: '1'
+        run: npm run test:dependency-failure -- --scenario "$DEPENDENCY_FAILURE_SCENARIO"
+        working-directory: backend
+      - name: Upload fault-injection logs and metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-failure-${{ matrix.scenario }}
+          path: backend/test-results/dependency-failure/${{ matrix.scenario }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   # ── 4. Migration path filter ─────────────────────────────────────────────────
   # Checks whether backend/migrations/** or backend/package.json changed.
@@ -149,7 +199,85 @@ jobs:
       - name: Check every backend ErrorCode has a frontend message mapping
         run: node scripts/check-error-code-mappings.mjs
 
-  # ── 10. End-to-end tests (desktop + mobile) ───────────────────────────────────
+  # ── 10. Contributor quick-start verification (issue #582) ────────────────────
+  # Runs the documented clean-checkout workflow on a fresh runner so the
+  # contributor guide cannot drift from package scripts, required env vars,
+  # migrations, seed, and focused test commands. Uses only local/dev values
+  # (no production secrets, no external value-bearing transactions).
+  contributor-quickstart:
+    needs: supply-chain-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Verify documented scripts exist in package.json
+        run: node scripts/check-docs-scripts.mjs
+
+      - name: Verify documented env vars against .env.example
+        run: node scripts/check-docs-env.mjs
+
+      - name: Install backend dependencies (documented)
+        run: npm ci
+        working-directory: backend
+
+      - name: Install frontend dependencies (documented)
+        run: npm ci
+        working-directory: frontend
+
+      - name: Prepare local environment (documented)
+        run: |
+          set -euo pipefail
+          if [ ! -f backend/.env ]; then
+            cp backend/.env.example backend/.env
+          fi
+          # Local-only placeholder values; never production secrets.
+          echo "NODE_ENV=test" >> backend/.env
+          echo "DATABASE_URL=postgres://postgres:postgres@localhost:5432/remitlend_test" >> backend/.env
+
+      - name: Start local Postgres (documented)
+        run: |
+          docker run -d --name remitlend-pg \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=remitlend_test \
+            -p 5432:5432 postgres:16
+          for i in $(seq 1 30); do
+            if docker exec remitlend-pg pg_isready -U postgres >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Postgres did not become ready in time."
+          exit 1
+
+      - name: Run migrations (documented)
+        run: npm run migrate
+        working-directory: backend
+
+      - name: Seed database (documented)
+        run: npm run seed
+        working-directory: backend
+
+      - name: Run focused backend test (documented)
+        run: npm test -- --runInBand
+        working-directory: backend
+
+      - name: Run focused frontend test (documented)
+        run: npm test -- --run
+        working-directory: frontend
+
+  # ── 11. End-to-end tests (desktop + mobile) ───────────────────────────────────
   # Issue #406: mobile-chrome and mobile-safari Playwright projects run here.
   e2e:
     needs: [supply-chain-audit, frontend]
@@ -158,7 +286,7 @@ jobs:
     permissions:
       contents: read
 
-  # ── 11. Smart-contract CI ─────────────────────────────────────────────────────
+  # ── 12. Smart-contract CI ─────────────────────────────────────────────────────
   contracts:
     needs: money-policy
     runs-on: ubuntu-latest

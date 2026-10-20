@@ -16,7 +16,8 @@ interface VerificationStatus {
  */
 class ContractVerificationService {
   private readonly EXPLORER_BASE_URL = 'https://stellar.expert/explorer';
-  private readonly VERIFICATION_CHECK_INTERVAL = 60 * 60 * 1000; // 1 hour
+  private readonly EXPLORER_API_URL = 'https://stellar.expert/api/v2/contract';
+  private readonly EXPLORER_TIMEOUT_MS = 30 * 1000;
 
   /**
    * Create verification record in database.
@@ -125,17 +126,22 @@ class ContractVerificationService {
 
   /**
    * Check if a contract is verified on Stellar explorer.
-   * This is a polling check that can be called periodically.
+   * Throws on network or HTTP errors so callers can record the failure reason.
    */
   async checkStellarExplorerVerification(contractId: string): Promise<boolean> {
     try {
-      // In production, this would make an API call to Stellar expert/explorer
-      // For now, we track verification status in our database
-      const status = await this.getVerificationStatus(contractId);
-      return status?.verified ?? false;
+      const response = await fetch(`${this.EXPLORER_API_URL}/${contractId}`, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(this.EXPLORER_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new Error(`Stellar explorer responded with HTTP ${response.status}`);
+      }
+      const body = (await response.json()) as { verified?: boolean };
+      return body.verified === true;
     } catch (error) {
       logger.error('Error checking Stellar explorer verification', { contractId, error });
-      return false;
+      throw error;
     }
   }
 
@@ -143,8 +149,7 @@ class ContractVerificationService {
    * Get Stellar explorer URL for the contract.
    */
   getExplorerUrl(contractId: string): string {
-    const network = process.env.STELLAR_NETWORK_ENV || 'testnet';
-    const networkPath = network === 'public' ? 'public' : 'testnet';
+    const networkPath = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
     return `${this.EXPLORER_BASE_URL}/${networkPath}/contract/${contractId}`;
   }
 
@@ -155,13 +160,14 @@ class ContractVerificationService {
     Array<{
       contractId: string;
       contractName: string;
+      sourceCodeHash: string;
       createdAt: string;
     }>
   > {
     try {
       const result = await pool.query(
         `
-        SELECT contract_id, contract_name, created_at
+        SELECT contract_id, contract_name, source_code_hash, created_at
         FROM contract_verification
         WHERE verified = false
         ORDER BY created_at ASC
@@ -172,10 +178,42 @@ class ContractVerificationService {
       return result.rows.map((row) => ({
         contractId: row.contract_id,
         contractName: row.contract_name,
+        sourceCodeHash: row.source_code_hash,
         createdAt: row.created_at,
       }));
     } catch (error) {
       logger.error('Error getting unverified contracts', { error });
+      throw error;
+    }
+  }
+
+  /**
+   * Get every tracked contract with its verification state, for the admin UI.
+   */
+  async getAllVerificationStatuses(): Promise<
+    Array<{
+      contractId: string;
+      contractName: string;
+      verified: boolean;
+      verifiedAt: string | null;
+      explorerUrl: string;
+    }>
+  > {
+    try {
+      const result = await pool.query(`
+        SELECT contract_id, contract_name, verified, verified_at
+        FROM contract_verification
+        ORDER BY created_at ASC
+      `);
+      return result.rows.map((row) => ({
+        contractId: row.contract_id,
+        contractName: row.contract_name,
+        verified: row.verified,
+        verifiedAt: row.verified_at,
+        explorerUrl: this.getExplorerUrl(row.contract_id),
+      }));
+    } catch (error) {
+      logger.error('Error getting verification statuses', { error });
       throw error;
     }
   }
@@ -192,18 +230,19 @@ class ContractVerificationService {
     try {
       const result = await pool.query(`
         SELECT
-          COUNT(*) as total,
-          SUM(CASE WHEN verified = true THEN 1 ELSE 0 END) as verified
+          COUNT(*) AS total,
+          COALESCE(SUM(CASE WHEN verified = true THEN 1 ELSE 0 END), 0) AS verified
         FROM contract_verification
       `);
 
-      const { total, verified } = result.rows[0];
+      const total = parseInt(result.rows[0].total, 10);
+      const verified = parseInt(result.rows[0].verified, 10);
       const pending = total - verified;
       const verificationRate = total > 0 ? Math.round((verified / total) * 100) : 0;
 
       return {
-        total: parseInt(total),
-        verified: parseInt(verified),
+        total,
+        verified,
         pending,
         verificationRate,
       };

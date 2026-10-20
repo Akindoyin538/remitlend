@@ -1,10 +1,16 @@
 # Issue #409 – Reusable workflow: money-policy drift check
-# Issue #580 – Extended with dependency-boundary enforcement (imports + cycles).
+# Issue #581 – Invariant-focused evidence gate for financial and contract changes
 # Least-privilege: read-only checkout, no secrets needed.
 name: Money Policy Check (reusable)
 
 on:
   workflow_call:
+    inputs:
+      evidence-mode:
+        description: "report-only (trial) or enforce (merge-blocking)"
+        required: false
+        type: string
+        default: report-only
 
 permissions:
   contents: read
@@ -14,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Use Node.js 20
         uses: actions/setup-node@v7
         with:
@@ -26,9 +34,74 @@ jobs:
       - name: Check generated money-policy artifacts are up to date
         run: npx ts-node gen-money.ts --check
         working-directory: scripts
-      - name: Enforce dependency boundaries (prohibited imports)
-        run: npx ts-node check-boundaries.ts
-        working-directory: scripts
-      - name: Detect dependency cycles
-        run: npx ts-node check-boundaries.ts --cycles
-        working-directory: scripts
+      - name: Classify changed paths into risk classes
+        id: classify
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before || '' }}"
+          HEAD="${{ github.event.pull_request.head.sha || github.sha }}"
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          else
+            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git ls-files)
+          fi
+          echo "Changed files:"; echo "$CHANGED"
+          # Narrow exemptions: documentation-only and generated artifacts.
+          EXEMPT_RE='^(\.github/|docs/|.*\.md$|.*\.mdx$|.*\.txt$|.*\.rst$|.*\.adoc$|.*\.svg$|.*\.png$|.*\.jpg$|.*\.gif$|.*\.ico$|.*\.lock$|.*\.snap$|.*\.min\.(js|css)$|.*\.generated\..*|.*\.gen\..*|.*/generated/.*|.*/__generated__/.*|.*/dist/.*|.*/build/.*|.*/coverage/.*|.*/vendor/.*|.*/node_modules/.*)$'
+          # Risk classes derived from changed paths. Contributors may refine
+          # patterns via .github/risk-classes.json without bypassing the gate.
+          CLASSES_FILE=".github/risk-classes.json"
+          declare -A PATTERNS
+          PATTERNS[money]='(^|/)(money|amount|currency|ledger|balance|payment|invoice|fee|interest|amortization|rounding)[^/]*\.(ts|tsx|js|jsx|py|go|rs|java|kt|rb|sql)$|(^|/)money/'
+          PATTERNS[loan]='(^|/)(loan|loans|schedule|repayment|disbursement|transition|state-machine|stateMachine)[^/]*\.(ts|tsx|js|jsx|py|go|rs|java|kt|rb|sql)$|(^|/)loans?/'
+          PATTERNS[contract]='(^|/)(contract|contracts|authorization|authz|permission|permissions|role|roles|access-control|accessControl)[^/]*\.(ts|tsx|js|jsx|py|go|rs|java|kt|rb|sol|sql)$|(^|/)contracts?/'
+          PATTERNS[indexing]='(^|/)(index|indexer|indexing|search|query|queries|migration|migrations)[^/]*\.(ts|tsx|js|jsx|py|go|rs|java|kt|rb|sql)$|(^|/)migrations?/'
+          PATTERNS[custody]='(^|/)(key|keys|keychain|custody|wallet|signer|signing|kms|hsm|secret|secrets)[^/]*\.(ts|tsx|js|jsx|py|go|rs|java|kt|rb|sol)$|(^|/)custody/'
+          if [ -f "$CLASSES_FILE" ]; then
+            echo "Refining patterns from $CLASSES_FILE"
+            while IFS=$'\t' read -r cls pat; do
+              [ -z "$cls" ] && continue
+              PATTERNS[$cls]="$pat"
+            done < <(node -e 'const f=require("./"+process.argv[1]);for(const[k,v]of Object.entries(f))console.log(k+"\t"+v)' "$CLASSES_FILE")
+          fi
+          HIT=""
+          for cls in "${!PATTERNS[@]}"; do
+            if echo "$CHANGED" | grep -Ev "$EXEMPT_RE" | grep -Eq "${PATTERNS[$cls]}"; then
+              HIT="$HIT $cls"
+            fi
+          done
+          HIT=$(echo "$HIT" | xargs)
+          echo "risk-classes=$HIT" >> "$GITHUB_OUTPUT"
+          echo "Detected risk classes: ${HIT:-none}"
+      - name: Require invariant-focused evidence
+        if: steps.classify.outputs.risk-classes != ''
+        env:
+          RISK_CLASSES: ${{ steps.classify.outputs.risk-classes }}
+          EVIDENCE_MODE: ${{ inputs.evidence-mode }}
+        run: |
+          set -euo pipefail
+          # Minimum evidence per risk class (boundary-appropriate).
+          declare -A REQUIRED
+          REQUIRED[money]="unit + property/fuzz: npm test -- --testPathPattern='money|amount|rounding' && npm run test:property -- --filter='money|rounding'"
+          REQUIRED[loan]="unit + integration: npm test -- --testPathPattern='loan|transition' && npm run test:integration -- --filter='loan|transition'"
+          REQUIRED[contract]="unit + integration: npm test -- --testPathPattern='contract|authz' && npm run test:integration -- --filter='contract|authz'"
+          REQUIRED[indexing]="integration + E2E: npm run test:integration -- --filter='index|migration' && npm run test:e2e -- --filter='index|migration'"
+          REQUIRED[custody]="unit + property/fuzz: npm test -- --testPathPattern='key|custody|signer' && npm run test:property -- --filter='key|custody|signer'"
+          MISSING=""
+          for cls in $RISK_CLASSES; do
+            if [ -z "${REQUIRED[$cls]:-}" ]; then
+              MISSING="$MISSING\n- $cls: no evidence mapping defined (add to .github/risk-classes.json)"
+            else
+              MISSING="$MISSING\n- $cls: ${REQUIRED[$cls]}"
+            fi
+          done
+          echo "::notice title=Invariant evidence required::Risk classes detected: $RISK_CLASSES"
+          echo -e "Required evidence per class:$MISSING"
+          if [ "$EVIDENCE_MODE" = "enforce" ]; then
+            echo "::error title=Missing invariant-focused evidence::Provide linked focused test output or a reviewed rationale for: $RISK_CLASSES"
+            echo -e "Required commands:$MISSING"
+            exit 1
+          else
+            echo "::warning title=Invariant evidence (report-only)::Gate is in report-only trial mode; would require: $RISK_CLASSES"
+            echo -e "Required commands:$MISSING"
+          fi

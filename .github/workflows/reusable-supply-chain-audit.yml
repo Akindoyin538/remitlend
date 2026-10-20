@@ -1,4 +1,5 @@
 # Issue #409 – Reusable workflow: supply-chain audit
+# Issue #567 – Dependency vulnerability exception lifecycle with expiry
 # Least-privilege: only reads code, no write permissions needed.
 name: Supply Chain Audit (reusable)
 
@@ -28,3 +29,122 @@ jobs:
             exit 1
           fi
           echo "No known malicious packages found."
+      - name: Validate dependency vulnerability exception register
+        run: |
+          set -euo pipefail
+          REGISTER="security/dependency-exceptions.json"
+          if [ ! -f "$REGISTER" ]; then
+            echo "::error::SECURITY GATE: exception register $REGISTER is missing"
+            exit 1
+          fi
+          node - "$REGISTER" <<'NODE'
+          const fs = require('fs');
+          const path = process.argv[2];
+          const today = new Date().toISOString().slice(0, 10);
+          const MAX_EXPIRY_DAYS = 180;
+          const REQUIRED = ['package', 'advisory', 'affectedVersion', 'compensatingControl', 'owner', 'rationale', 'remediationTarget', 'expiresOn'];
+          let register;
+          try {
+            register = JSON.parse(fs.readFileSync(path, 'utf8'));
+          } catch (err) {
+            console.error(`::error::SECURITY GATE: ${path} is not valid JSON: ${err.message}`);
+            process.exit(1);
+          }
+          const exceptions = Array.isArray(register.exceptions) ? register.exceptions : [];
+          const failures = [];
+          const seen = new Set();
+          for (const [index, entry] of exceptions.entries()) {
+            const label = entry && entry.advisory ? entry.advisory : `exceptions[${index}]`;
+            for (const field of REQUIRED) {
+              const value = entry ? entry[field] : undefined;
+              if (typeof value !== 'string' || value.trim() === '') {
+                failures.push(`${label}: missing required field '${field}'`);
+              }
+            }
+            if (!entry || typeof entry !== 'object') {
+              continue;
+            }
+            const key = `${entry.package}@${entry.advisory}`;
+            if (seen.has(key)) {
+              failures.push(`${label}: duplicate exception for ${key}`);
+            }
+            seen.add(key);
+            if (typeof entry.expiresOn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.expiresOn)) {
+              if (entry.expiresOn < today) {
+                failures.push(`${label}: exception expired on ${entry.expiresOn} (owner: ${entry.owner || 'unowned'})`);
+              }
+              const maxExpiry = new Date(Date.now() + MAX_EXPIRY_DAYS * 86400000).toISOString().slice(0, 10);
+              if (entry.expiresOn > maxExpiry) {
+                failures.push(`${label}: expiry ${entry.expiresOn} exceeds maximum ${MAX_EXPIRY_DAYS}-day window (${maxExpiry})`);
+              }
+            } else {
+              failures.push(`${label}: expiresOn must be an ISO date (YYYY-MM-DD)`);
+            }
+            if (entry.owner === 'unowned' || entry.owner === 'none') {
+              failures.push(`${label}: exception is unowned`);
+            }
+            if (Array.isArray(entry.reviews)) {
+              for (const review of entry.reviews) {
+                if (!review || typeof review.reviewer !== 'string' || typeof review.date !== 'string' || typeof review.justification !== 'string') {
+                  failures.push(`${label}: renewal review records require reviewer, date, and justification`);
+                }
+              }
+            }
+          }
+          if (failures.length > 0) {
+            for (const failure of failures) {
+              console.error(`::error::SECURITY GATE: ${failure}`);
+            }
+            process.exit(1);
+          }
+          console.log(`Validated ${exceptions.length} dependency exception(s); none expired or unowned.`);
+          NODE
+      - name: Report affected dependency paths from lockfile evidence
+        run: |
+          set -euo pipefail
+          REGISTER="security/dependency-exceptions.json"
+          if [ ! -f "$REGISTER" ]; then
+            echo "No exception register present; skipping dependency path report."
+            exit 0
+          fi
+          node - "$REGISTER" <<'NODE'
+          const fs = require('fs');
+          const path = process.argv[2];
+          const register = JSON.parse(fs.readFileSync(path, 'utf8'));
+          const exceptions = Array.isArray(register.exceptions) ? register.exceptions : [];
+          const lockfiles = ['backend/package-lock.json', 'frontend/package-lock.json', 'scripts/package-lock.json'];
+          const lockData = [];
+          for (const lockfile of lockfiles) {
+            if (fs.existsSync(lockfile)) {
+              try {
+                lockData.push({ lockfile, data: JSON.parse(fs.readFileSync(lockfile, 'utf8')) });
+              } catch (err) {
+                console.error(`::warning::Could not parse ${lockfile}: ${err.message}`);
+              }
+            }
+          }
+          const findPaths = (pkg) => {
+            const paths = [];
+            for (const { lockfile, data } of lockData) {
+              const packages = data.packages || {};
+              for (const [key, meta] of Object.entries(packages)) {
+                if (meta && meta.name === pkg) {
+                  paths.push(`${lockfile}:${key || pkg}`);
+                }
+              }
+              const deps = data.dependencies || {};
+              if (deps[pkg]) {
+                paths.push(`${lockfile}:${pkg}`);
+              }
+            }
+            return paths;
+          };
+          for (const entry of exceptions) {
+            const paths = findPaths(entry.package);
+            if (paths.length === 0) {
+              console.log(`::notice::${entry.package} (${entry.advisory}): not-applicable — no lockfile path found`);
+            } else {
+              console.log(`::warning::${entry.package} (${entry.advisory}): affected — paths: ${paths.join(', ')}`);
+            }
+          }
+          NODE

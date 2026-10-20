@@ -61,6 +61,17 @@ export default defineConfig({
       testIgnore: "visual/**",
       use: { ...devices["iPhone 13"] },
     },
+    // Issue #562: strict nonce-based CSP rollout. Dedicated project that
+    // asserts the enforced Content-Security-Policy headers and exercises
+    // critical wallet + transaction routes under the policy. Kept separate
+    // from the default projects so CSP assertions can be run in isolation
+    // during the report-only -> enforce rollout.
+    {
+      name: "csp",
+      testDir: "./e2e/csp",
+      testIgnore: "visual/**",
+      use: { ...devices["Desktop Chrome"] },
+    },
   ],
 
   webServer: {

@@ -1,51 +1,93 @@
 # Backend
 
-This directory contains the backend service for the application.
+Node.js service for the lending platform. It exposes the REST API, runs database
+migrations, and hosts the scheduled jobs.
 
-## Development
+## Supported toolchain
 
-### Seeding local data
+| Tool | Supported version |
+| --- | --- |
+| Node.js | 20.x LTS (18.x works, 22.x untested) |
+| npm | 10.x (ships with Node 20) |
+| PostgreSQL | 15.x or 16.x |
+| Docker | 24.x+ (only needed for the container workflow) |
 
-The seed tooling supports named, versioned scenarios so that local product
-development can reproduce the boundary states that borrower, lender, support,
-and admin contributors care about. Scenario data is synthetic and deterministic:
-repeated seed runs produce the same stable identifiers and do not accumulate
-duplicate records.
+If `node --version` reports anything older than 18, install Node 20 LTS before
+continuing. The scripts below assume `npm`; `yarn` and `pnpm` are not supported.
 
-#### Available scenarios
+## Clean-checkout quick start
 
-| Scenario | Principal | Lifecycle state | Expected API/UI behavior |
-| --- | --- | --- | --- |
-| `borrower-pending` | borrower | pending | Loan application is visible in the borrower dashboard with a pending status; approval actions are unavailable. |
-| `borrower-approved` | borrower | approved | Approved loan is listed with repayment schedule; borrower can view next payment. |
-| `borrower-partially-repaid` | borrower | partially repaid | Outstanding balance reflects partial repayment; repayment history shows prior payments. |
-| `borrower-repaid` | borrower | repaid | Loan is closed with zero balance; no further repayment actions are offered. |
-| `borrower-defaulted` | borrower | defaulted | Loan is flagged as defaulted; collections messaging is shown and repayment is restricted. |
-| `lender-disputed-score` | lender | disputed-score | Disputed score is surfaced with the dispute state; score-dependent actions are gated. |
-| `support-degraded-service` | support | degraded-service | Degraded-service banner is shown; support tooling reflects limited availability. |
+These are the exact commands a fresh clone needs. They are executed on every
+pull request by `.github/workflows/verify-contributor-setup.yml`, so if a step
+here drifts from `package.json` the workflow fails and points at this section.
 
-Each scenario produces stable identifiers (for example, deterministic user and
-loan IDs) so that tests can reference them without hard-coding ad hoc values.
+```bash
+# 1. Install dependencies (uses the committed lockfile)
+npm ci
 
-#### Running seed and reset
+# 2. Create your local environment file from the checked-in example
+cp .env.example .env
 
-Seed and reset commands refuse to run against non-development environments
-unless an explicit safe override is provided. This prevents accidental data
-changes in staging or production.
+# 3. Run database migrations
+npm run migrate
 
-```sh
-# Seed a specific scenario (development only)
-<seed-command> --scenario borrower-pending
+# 4. Seed development data
+npm run seed
 
-# Reset seeded data (development only)
-<reset-command>
-
-# Explicit override for a non-development environment (use with care)
-<seed-command> --scenario borrower-pending --allow-non-development
+# 5. Run the focused test suite
+npm test
 ```
 
-#### Smoke tests
+Every script referenced above (`migrate`, `seed`, `test`) must exist in
+`package.json`. The verification workflow parses this file and fails with the
+section name and the missing script if one is renamed or removed.
 
-Smoke tests validate scenario constraints and principal ownership. They assert
-that each scenario is owned by the expected principal and that lifecycle
-constraints (for example, a repaid loan has a zero balance) hold.
+## Environment variables
+
+Copy `.env.example` to `.env` and fill in local values. The verification
+workflow checks that every variable documented here also appears in
+`.env.example`, so add new variables to both places.
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | PostgreSQL connection string, e.g. `postgres://user:pass@localhost:5432/lending` |
+| `PORT` | no | HTTP port, defaults to `3000` |
+| `NODE_ENV` | no | `development`, `test`, or `production` |
+| `JWT_SECRET` | yes | Signing key for session tokens; use any local-only value |
+
+Never commit real credentials. The workflow only uses throwaway local values and
+performs no external or value-bearing transactions.
+
+## Container workflow
+
+```bash
+docker compose up --build
+```
+
+This starts PostgreSQL and the API together. Run the migration and seed steps
+from inside the API container if you use this path instead of a local database.
+
+## Troubleshooting
+
+**`npm ci` fails with `EUSAGE` or lockfile errors.**
+Your `package-lock.json` is out of sync or you are on the wrong Node version.
+Run `node --version` and confirm 20.x, then `git checkout package-lock.json` and
+retry. Do not run `npm install` to "fix" it — that rewrites the lockfile.
+
+**`npm run migrate` cannot reach the database.**
+PostgreSQL is not running or `DATABASE_URL` is wrong. Start it with
+`docker compose up -d db`, then verify the host/port in `.env` match the
+container. On macOS with Homebrew, `brew services start postgresql@16`.
+
+**`npm run seed` fails with duplicate key errors.**
+The database already contains seeded rows. Reset it with
+`npm run migrate:reset` (development only) and run `npm run seed` again.
+
+**`npm test` fails on a fresh checkout but passes locally.**
+You likely have stale build output or a dirty `.env`. Remove `node_modules` and
+`.env`, then repeat the quick start from step 1. Tests must pass without any
+network access or external services.
+
+**A documented command no longer exists.**
+The verification workflow reports the file, section, and missing script. Update
+this README and `package.json` together in the same pull request.
