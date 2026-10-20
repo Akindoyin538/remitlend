@@ -86,6 +86,48 @@ node is never presented as a failed transaction.
 
 See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
+## Cross-Contract Interface Compatibility
+
+The loan manager, lending pool, NFT, and backend clients evolve independently.
+A function rename or changed return semantics can compile locally yet break a
+deployed contract integration at runtime. To prevent this, public contract
+interfaces are pinned by **versioned compatibility fixtures** and checked in CI
+before any contract or client ABI change merges.
+
+### Versioned Fixtures
+
+Fixtures live under `contracts/compatibility/fixtures/` and are named by
+interface version (for example `loan_manager.v1.json`). Each fixture captures
+the surface used by production flows:
+
+- Function names and argument order/types.
+- Return shape.
+- Emitted events.
+- Error codes.
+
+### Compatibility Check
+
+A deterministic check (`contracts/compatibility/check.ts`) compares the current
+contract artifacts and client adapters against the declared baseline fixture.
+It requires no mainnet credentials and runs entirely against local artifacts.
+
+- A **breaking change** (removed/renamed function, reordered or retyped
+  argument, changed return shape, removed event, or changed error code) fails
+  the check unless the fixture declares an explicit version bump.
+- Additive, backward-compatible changes pass without a version bump.
+
+### CI Enforcement
+
+The check is wired into the reusable contract-compatibility workflow so it runs
+before contract or client ABI changes merge. At least one end-to-end loan
+lifecycle test exercises the loan manager against the compatibility fixture.
+
+### Supported Version Matrix
+
+Supported contract/client version combinations are documented in the
+network-contract matrix (`docs/network-contract-matrix.md`). A client must only
+be deployed against a contract version listed as compatible for it.
+
 ## Observability
 
 - Structured errors are emitted for budget violations and dependency failures.
@@ -98,4 +140,4 @@ See [docs/transaction-recovery-ux.md](docs/transaction-recovery-ux.md).
 
 ## Testing
 
-Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant.
+Focused automated tests cover success, boundary values, invalid configuration, unsupported environments, and dependency failure paths for route budgets, alongside existing routing and offline tests. Loan cost disclosure and transaction recovery have dedicated unit and component suites covering rounding boundaries, every typed error and failure state, hostile input, stale and unavailable authoritative data, retry safety, and the double-submission invariant. Cross-contract interface compatibility is covered by fixture-driven checks and an end-to-end loan lifecycle test.
