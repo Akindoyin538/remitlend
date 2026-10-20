@@ -40,6 +40,7 @@ import { pauseGuard } from './middleware/pauseGuard.js';
 import { deprecationHeadersMiddleware } from './middleware/deprecationHeaders.js';
 import { asyncHandler } from './utils/asyncHandler.js';
 import { AppError } from './errors/AppError.js';
+import logger from './utils/logger.js';
 import {
   setupConnectionLeakDetection,
   shutdownConnectionLeakDetection,
@@ -68,6 +69,10 @@ const allowedOriginsList = [configuredFrontendUrl, ...additionalAllowedOrigins].
 
 if (isProduction && allowedOriginsList.length === 0) {
   throw new Error('No allowed origins configured for CORS in production. Set FRONTEND_URL.');
+}
+
+if (isProduction && allowedOriginsList.some((origin) => origin.trim() === '*')) {
+  throw new Error('Wildcard CORS origin "*" is not allowed in production. Use explicit origins.');
 }
 
 const normalizeOrigin = (value: string) => value.trim().replace(/\/+$/, '').toLowerCase();
@@ -134,6 +139,7 @@ const corsOptions: cors.CorsOptions = {
       return callback(null, true);
     }
 
+    logger.warn('CORS origin rejected', { origin });
     return callback(AppError.forbidden('Origin is not allowed by CORS policy'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -155,7 +161,8 @@ const corsOptions: cors.CorsOptions = {
 app.use(cors(corsOptions));
 app.use(compression());
 // Explicit request body size limit set to 100kb to mitigate payload-based DoS and unbounded audit log writes.
-app.use(express.json({ limit: '100kb' }));
+// CSP reports (report-uri) arrive as `application/csp-report`, not plain JSON, so accept that type too.
+app.use(express.json({ limit: '100kb', type: ['application/json', 'application/csp-report'] }));
 app.use(globalRateLimiter);
 app.use(requestIdMiddleware);
 // Trace context (#414): resolves/creates the W3C `traceparent` for the request

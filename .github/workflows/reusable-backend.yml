@@ -4,6 +4,12 @@ name: Backend CI (reusable)
 
 on:
   workflow_call:
+    inputs:
+      run-fault-injection:
+        description: "Run the deterministic dependency-failure (fault-injection) suite"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +42,29 @@ jobs:
         working-directory: backend
         env:
           NODE_ENV: test
+          DATABASE_URL: postgres://user:pass@localhost:5432/test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test_jwt_secret
+          STELLAR_RPC_URL: https://rpc.test.invalid
+          STELLAR_NETWORK_PASSPHRASE: Test SDF Network ; September 2015
+          LOAN_MANAGER_CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+          LENDING_POOL_CONTRACT_ID: CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+          REMITTANCE_NFT_CONTRACT_ID: CDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+          MULTISIG_GOVERNANCE_CONTRACT_ID: CEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+          POOL_TOKEN_ADDRESS: CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+          LOAN_MANAGER_ADMIN_SECRET: test_admin_secret
+          INTERNAL_API_KEY: test_internal_api_key
+          FRONTEND_URL: https://frontend.example.com
+      - name: Run dependency-failure fault-injection suite
+        if: ${{ inputs.run-fault-injection }}
+        run: npm run test:fault-injection
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          # Deterministic, bounded, offline: no public network access.
+          FAULT_INJECTION: "1"
+          FAULT_INJECTION_SEED: "574"
+          FAULT_INJECTION_TIMEOUT_MS: "30000"
           DATABASE_URL: postgres://user:pass@localhost:5432/test
           REDIS_URL: redis://localhost:6379
           JWT_SECRET: test_jwt_secret

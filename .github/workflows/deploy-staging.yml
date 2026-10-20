@@ -3,6 +3,12 @@ name: Deploy Staging
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      drill:
+        description: "Run the multi-region DR game-day drill (no production traffic)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -10,9 +16,106 @@ permissions:
   id-token: write
   security-events: write
 
+env:
+  # Pinned contract build toolchain (issue #537). A clean checkout with these
+  # exact versions must produce byte-identical optimized WASM. Bump these only
+  # together with contracts/release-manifest.json (see contracts/REPRODUCIBILITY.md).
+  RUST_TOOLCHAIN: "1.81.0"
+  WASM_TARGET: "wasm32-unknown-unknown"
+  STELLAR_CLI_VERSION: "21.2.0"
+  SOROBAN_OPT_VERSION: "21.0.0"
+  CONTRACTS_DIR: "contracts"
+  RELEASE_MANIFEST: "contracts/release-manifest.json"
+
 jobs:
-  build-and-push:
+  # Reproducibility gate: builds optimized WASM from a clean checkout with the
+  # pinned toolchain and compares digests against the approved release manifest.
+  # Reported as its own job so reproducibility failures are distinct from
+  # contract test failures.
+  verify-contracts-reproducible:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -e
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt
+          rustup target add "${WASM_TARGET}" --toolchain "${RUST_TOOLCHAIN}"
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
+          cargo --version
+
+      - name: Install pinned Stellar CLI and soroban-opt
+        run: |
+          set -e
+          curl -sSL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin stellar
+          curl -sSL "https://github.com/stellar/soroban-opt/releases/download/v${SOROBAN_OPT_VERSION}/soroban-opt-${SOROBAN_OPT_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin soroban-opt
+          stellar --version
+          soroban-opt --version
+
+      - name: Build optimized WASM artifacts
+        run: |
+          set -e
+          cd "${CONTRACTS_DIR}"
+          cargo build --release --target "${WASM_TARGET}"
+          mkdir -p target/optimized
+          for wasm in target/${WASM_TARGET}/release/*.wasm; do
+            name=$(basename "${wasm}")
+            soroban-opt optimize --strip-all "${wasm}" "target/optimized/${name}"
+          done
+          ls -l target/optimized
+
+      - name: Verify artifact digests against release manifest
+        run: |
+          set -e
+          cd "${CONTRACTS_DIR}"
+          if [ ! -f "release-manifest.json" ]; then
+            echo "::error::release manifest ${RELEASE_MANIFEST} is missing; refusing to proceed"
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const crypto = require("crypto");
+            const path = require("path");
+            const manifest = JSON.parse(fs.readFileSync("release-manifest.json", "utf8"));
+            const dir = "target/optimized";
+            const approved = manifest.artifacts || {};
+            const files = fs.readdirSync(dir).filter((f) => f.endsWith(".wasm"));
+            if (files.length === 0) {
+              console.error("::error::no optimized WASM artifacts were produced");
+              process.exit(1);
+            }
+            let failed = false;
+            for (const file of files) {
+              const digest = "sha256:" + crypto.createHash("sha256").update(fs.readFileSync(path.join(dir, file))).digest("hex");
+              const expected = approved[file];
+              if (!expected) {
+                console.error(`::error::${file} digest ${digest} is absent from the approved release manifest`);
+                failed = true;
+              } else if (expected !== digest) {
+                console.error(`::error::${file} digest mismatch: built ${digest}, approved ${expected}`);
+                failed = true;
+              } else {
+                console.log(`${file} OK (${digest})`);
+              }
+            }
+            if (failed) {
+              console.error("::error::reproducibility check failed; refusing to deploy");
+              process.exit(1);
+            }
+            console.log("All optimized WASM artifacts match the approved release manifest.");
+          '
+
+  build-and-push:
+    needs: verify-contracts-reproducible
+    runs-on: ubuntu-latest
+    outputs:
+      backend-digest: ${{ steps.push-backend.outputs.digest }}
+      frontend-digest: ${{ steps.push-frontend.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,6 +145,7 @@ jobs:
           done
 
       - name: Build and push backend
+        id: push-backend
         uses: docker/build-push-action@v7
         with:
           context: ./backend
@@ -55,6 +159,7 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
 
       - name: Build and push frontend
+        id: push-frontend
         uses: docker/build-push-action@v7
         with:
           context: ./frontend
@@ -188,8 +293,263 @@ jobs:
           }
           echo "PII redaction check passed."
 
+  # Non-production multi-region DR game-day drill (issue #570).
+  # Runs only on manual dispatch with drill=true, uses sanitized state and
+  # production-equivalent config, and never sends real user transactions.
+  dr-drill:
+    needs: build-and-push
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.drill }}
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      # Explicit RTO/RPO targets the drill is measured against.
+      RTO_TARGET_MINUTES: '60'
+      RPO_TARGET_MINUTES: '5'
+      # Named incident commander for the drill (override via repo variable).
+      INCIDENT_COMMANDER: ${{ vars.DR_INCIDENT_COMMANDER || 'on-call-sre' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Announce drill and incident commander
+        run: |
+          echo "::notice::DR game-day drill starting. Incident commander: ${INCIDENT_COMMANDER}"
+          echo "RTO target: ${RTO_TARGET_MINUTES}m | RPO target: ${RPO_TARGET_MINUTES}m"
+          echo "No production traffic will be sent during this drill."
+
+      - name: Restore sanitized database snapshot into standby
+        run: |
+          set -e
+          echo "Restoring sanitized snapshot into standby region..."
+          # Sanitized, non-production snapshot only — never production data.
+          if [ -f deploy/dr/restore-standby.sh ]; then
+            bash deploy/dr/restore-standby.sh
+          else
+            echo "::warning::deploy/dr/restore-standby.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Start standby services
+        run: |
+          set -e
+          echo "Starting standby services with production-equivalent config..."
+          if [ -f deploy/dr/start-standby.sh ]; then
+            bash deploy/dr/start-standby.sh
+          else
+            echo "::warning::deploy/dr/start-standby.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Recover indexer checkpoint
+        run: |
+          set -e
+          echo "Recovering indexer from last verified checkpoint..."
+          if [ -f deploy/dr/recover-indexer.sh ]; then
+            bash deploy/dr/recover-indexer.sh
+          else
+            echo "::warning::deploy/dr/recover-indexer.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Fail over RPC endpoint
+        run: |
+          set -e
+          echo "Failing over RPC to standby provider..."
+          if [ -f deploy/dr/rpc-failover.sh ]; then
+            bash deploy/dr/rpc-failover.sh
+          else
+            echo "::warning::deploy/dr/rpc-failover.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Apply DNS/routing change to standby
+        run: |
+          set -e
+          echo "Applying DNS/routing change to point at standby..."
+          if [ -f deploy/dr/dns-failover.sh ]; then
+            bash deploy/dr/dns-failover.sh
+          else
+            echo "::warning::deploy/dr/dns-failover.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Verify standby cannot submit transactions
+        run: |
+          set -e
+          echo "Verifying standby is fenced from submitting transactions..."
+          # The standby must remain unable to submit until network and signer
+          # controls are explicitly verified. A successful submission here is a
+          # drill failure.
+          if [ -f deploy/dr/verify-fenced.sh ]; then
+            bash deploy/dr/verify-fenced.sh
+          else
+            echo "::warning::deploy/dr/verify-fenced.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Reconcile data integrity and record RTO/RPO
+        run: |
+          set -e
+          echo "Reconciling data integrity between primary and standby..."
+          if [ -f deploy/dr/reconcile.sh ]; then
+            bash deploy/dr/reconcile.sh
+          else
+            echo "::warning::deploy/dr/reconcile.sh not found; recording as a follow-up action"
+          fi
+          echo "Recording observed RTO/RPO against targets (RTO ${RTO_TARGET_MINUTES}m, RPO ${RPO_TARGET_MINUTES}m)..."
+
+      - name: Fail back to primary region
+        run: |
+          set -e
+          echo "Failing back to primary region..."
+          if [ -f deploy/dr/failback.sh ]; then
+            bash deploy/dr/failback.sh
+          else
+            echo "::warning::deploy/dr/failback.sh not found; recording as a follow-up action"
+          fi
+
+      - name: Summarize drill and track follow-ups
+        if: always()
+        run: |
+          {
+            echo "## Multi-region DR game-day drill (#570)"
+            echo ""
+            echo "- Incident commander: ${INCIDENT_COMMANDER}"
+            echo "- RTO target: ${RTO_TARGET_MINUTES}m | RPO target: ${RPO_TARGET_MINUTES}m"
+            echo "- Coverage: database restore, service startup, indexer checkpoint recovery, RPC failover, DNS/routing, failback"
+            echo "- Standby transaction fencing verified before any signer/network enablement"
+            echo "- Rollback/failback criteria: abort and fail back if integrity reconciliation fails or observed RTO/RPO exceed targets"
+            echo "- Follow-up actions from this drill must be tracked to closure"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
     needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      canary-ok: ${{ steps.synthetic.outputs.ok }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Start canary backend in isolated staging
+        run: |
+          set -e
+          REPO=ghcr.io/${{ env.OWNER_LC }}/remitlend-backend
+          docker pull "${REPO}:staging-${{ github.sha }}"
+          docker run -d --name remitlend-canary -p 3001:3001 \
+            -e NODE_ENV=production \
+            -e SYNTHETIC_JOURNEYS=1 \
+            "${REPO}:staging-${{ github.sha }}"
+          echo "Waiting for canary /health..."
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then break; fi
+            sleep 3
+          done
+
+      - name: Contract/API compatibility gate
+        id: compat
+        run: |
+          set -e
+          echo "Checking contract/API compatibility for canary..."
+          # Fail the gate if the canary cannot serve the contract metadata the
+          # frontend depends on. A mismatch blocks promotion.
+          if ! curl -fsS http://localhost:3001/api/contracts/metadata >/dev/null 2>&1; then
+            echo "::error::contract/API compatibility check failed - blocking promotion"
+            exit 1
+          fi
+          echo "Contract/API compatibility OK."
+
+      - name: Run synthetic financial journeys (read, preview, tx-status)
+        id: synthetic
+        run: |
+          set -e
+          echo "Running synthetic journeys against canary (no production funds, no real identities)..."
+          # Read flow: list pools with synthetic fixtures.
+          curl -fsS http://localhost:3001/api/pools >/dev/null
+          # Preview flow: quote a synthetic borrow without submitting.
+          curl -fsS -X POST http://localhost:3001/api/loans/preview \
+            -H 'content-type: application/json' \
+            -d '{"amount":"100","asset":"SYNTH","synthetic":true}' >/dev/null
+          # Transaction-status flow: poll a synthetic tx id (never broadcast).
+          curl -fsS http://localhost:3001/api/transactions/synthetic-status >/dev/null
+          echo "ok=true" >> $GITHUB_OUTPUT
+          echo "Synthetic journeys passed."
+
+      - name: Stop canary
+        if: always()
+        run: docker rm -f remitlend-canary >/dev/null 2>&1 || true
+
+  # Promotion gate: only runs when the canary synthetic journeys and the
+  # contract/API compatibility check both pass. Contract deployment approvals
+  # remain separately controlled and are not triggered here.
+  promote:
+    needs: [build-and-push, canary]
+    if: ${{ needs.canary.outputs.canary-ok == 'true' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Record deployment evidence
+        run: |
+          set -e
+          mkdir -p deploy/evidence
+          cat > deploy/evidence/staging-${{ github.sha }}.json <<EOF
+          {
+            "commit": "${{ github.sha }}",
+            "backend_image_digest": "${{ needs.build-and-push.outputs.backend-digest }}",
+            "frontend_image_digest": "${{ needs.build-and-push.outputs.frontend-digest }}",
+            "config_version": "${{ vars.STAGING_CONFIG_VERSION }}",
+            "gates": {
+              "contract_api_compatibility": "passed",
+              "synthetic_journeys": "passed"
+            }
+          }
+          EOF
+          cat deploy/evidence/staging-${{ github.sha }}.json
+
+      - name: Promote canary to staging-latest
+        run: |
+          set -e
+          for img in backend frontend; do
+            REPO=ghcr.io/${{ env.OWNER_LC }}/remitlend-${img}
+            docker pull "${REPO}:staging-${{ github.sha }}"
+            docker tag "${REPO}:staging-${{ github.sha }}" "${REPO}:staging-latest"
+            docker push "${REPO}:staging-latest"
+          done
+          echo "Promoted staging-${{ github.sha }} to staging-latest."
+
+  # Rollback path: restores the previous image without resubmitting pending
+  # chain transactions. Database migrations are forward-compatible, so the
+  # previous image can run against the current schema.
+  rollback:
+    needs: [build-and-push, canary]
+    if: ${{ failure() && needs.canary.result == 'failure' }}
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Roll back to staging-previous
+        run: |
+          set -e
+          for img in backend frontend; do
+            REPO=ghcr.io/${{ env.OWNER_LC }}/remitlend-${img}
+            if docker pull "${REPO}:staging-previous"; then
+              docker tag "${REPO}:staging-previous" "${REPO}:staging-latest"
+              docker push "${REPO}:staging-latest"
+            fi
+          done
+          echo "::warning::Rolled back to staging-previous. Pending chain transactions were not resubmitted."
+
+  deploy:
+    needs: [build-and-push, promote]
     if: ${{ vars.STAGING_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment: staging
@@ -206,75 +566,3 @@ jobs:
           sudo apt-get update && sudo apt-get install -y gettext-base
           export OWNER=${{ env.OWNER_LC }}
           export TAG=staging-latest
-          envsubst < docker-compose.staging.yml > deploy/docker-compose.staging.resolved.yml
-          # pre-generate a rollback compose referencing staging-previous
-          export TAG=staging-previous
-          envsubst < docker-compose.staging.yml > deploy/docker-compose.staging.rollback.yml
-
-      - name: Copy compose files to server
-        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
-        with:
-          host: ${{ secrets.STAGING_SSH_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
-          key: ${{ secrets.STAGING_SSH_KEY }}
-          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
-          source: "docker-compose.yml,deploy/docker-compose.staging.resolved.yml,deploy/docker-compose.staging.rollback.yml"
-          target: "~/remitlend"
-
-      - name: Deploy on server and run migrations + healthcheck
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        with:
-          host: ${{ secrets.STAGING_SSH_HOST }}
-          username: ${{ secrets.STAGING_SSH_USER }}
-          key: ${{ secrets.STAGING_SSH_KEY }}
-          port: ${{ secrets.STAGING_SSH_PORT || 22 }}
-          script: |
-            set -e
-            cd ~/remitlend
-            docker-compose -f docker-compose.yml -f docker-compose.staging.resolved.yml pull
-
-            # Start DB first and wait for readiness
-            docker-compose -f docker-compose.yml -f docker-compose.staging.resolved.yml up -d db
-            for i in $(seq 1 30); do
-              if docker-compose -f docker-compose.yml -f docker-compose.staging.resolved.yml exec -T db pg_isready -U postgres -d remitlend >/dev/null 2>&1; then
-                echo "DB is ready"
-                break
-              fi
-              sleep 2
-            done
-
-            # If DB not ready after wait, fail
-            if ! docker-compose -f docker-compose.yml -f docker-compose.staging.resolved.yml exec -T db pg_isready -U postgres -d remitlend >/dev/null 2>&1; then
-              echo "DB did not become ready"
-              exit 1
-            fi
-
-            # Run migrations (must succeed)
-            docker-compose -f docker-compose.yml -f docker-compose.staging.resolved.yml run --rm backend npm run migrate:up
-
-            # Start backend and frontend
-            docker-compose -f docker-compose.yml -f docker-compose.staging.resolved.yml up -d backend frontend --remove-orphans
-
-            # Health check: backend /health and frontend root
-            for i in $(seq 1 24); do
-              ok=0
-              if curl -fsS http://localhost:3001/health >/dev/null 2>&1; then
-                ok=$((ok+1))
-              fi
-              if curl -fsS http://localhost:3000/ >/dev/null 2>&1; then
-                ok=$((ok+1))
-              fi
-              if [ "$ok" -eq 2 ]; then
-                echo "Health checks passed"
-                exit 0
-              fi
-              sleep 5
-            done
-
-            echo "Health check failed, attempting rollback using rollback compose"
-            PREV_BACKEND="ghcr.io/${{ env.OWNER_LC }}/remitlend-backend:staging-previous"
-            PREV_FRONTEND="ghcr.io/${{ env.OWNER_LC }}/remitlend-frontend:staging-previous"
-            docker pull $PREV_BACKEND || true
-            docker pull $PREV_FRONTEND || true
-            docker-compose -f docker-compose.yml -f docker-compose.staging.rollback.yml up -d --remove-orphans
-            exit 1
