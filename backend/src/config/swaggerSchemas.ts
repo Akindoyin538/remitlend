@@ -45,9 +45,12 @@ export const swaggerSchemas = {
       message: {
         type: 'string',
         example:
-          'Sign this message to authenticate with RemitLend.\n\nNonce: abc123\nTimestamp: 1700000000000\n\nThis request will expire in 5 minutes.',
+          'Sign this message to authenticate with RemitLend.\n\nNonce: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nTimestamp: 1700000000000\n\nThis request will expire in 5 minutes.',
       },
-      nonce: { type: 'string', example: 'abc123def456' },
+      nonce: {
+        type: 'string',
+        example: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
       timestamp: { type: 'integer', example: 1700000000000 },
       expiresIn: { type: 'integer', example: 300000 },
     },

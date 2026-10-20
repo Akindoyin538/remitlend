@@ -107,6 +107,46 @@ Never place real production secrets in the example file.
 
 ## Production Deployment
 
+### Authentication Challenge Replay Protection
+
+The backend now persists SHA-256 digests of issued login challenge nonces and
+messages in `auth_challenge_nonces`. PostgreSQL atomically consumes a matching
+wallet challenge after signature verification. The public challenge/login
+payloads remain unchanged. Challenges issued before a backend upgrade must be
+requested again, and all backend instances must run the upgraded version for
+replay protection to be consistent across the fleet.
+
+Resource and migration impact: before this change challenge/login made zero
+challenge-specific SQL calls; afterward challenge issuance makes two (a
+bounded expired-row delete and insert) and login makes one indexed atomic update.
+The delete is capped at 500 expired rows per request, the incoming message is
+capped at 1,024 characters, and the migration adds an empty table plus its
+primary-key and expiry indexes with no data backfill. These are query-count and
+row-bound measurements; request latency should be compared using the existing
+`http_request_duration_seconds` histogram after rollout, since a production
+PostgreSQL benchmark was not available in this workspace.
+
+Roll out the migration before deploying the upgraded backend:
+
+1. Back up the database and apply migrations with `npm run migrate:up` from
+  `backend/` (or use the deployment job that runs the same migration command).
+2. Deploy the upgraded backend to all instances without leaving mixed old and
+  new login handlers serving traffic.
+3. Verify successful challenge/login, rejection of a second login with the same
+  signed message, and `auth_challenge_nonce_total` on the protected `/metrics`
+  endpoint. Watch for `auth.challenge_nonce.dependency_failure` log events.
+
+Database transient errors use the connection layer's bounded retry policy;
+continued DB failure returns HTTP 503 and authentication fails closed. Clients
+can safely request a new challenge and retry. A challenge whose consumption
+committed but whose response was lost may require a new challenge. Invalid
+signatures do not consume a challenge.
+
+Rollback by first restoring the previous backend version, then rolling back
+the schema migration with `npm run migrate:down`. The down migration drops
+challenge rows, so do not run it while upgraded handlers are active. Existing
+JWTs and contract state are unaffected.
+
 Before starting the production services, validate the Compose configuration:
 
 ```bash

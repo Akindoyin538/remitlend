@@ -1,6 +1,6 @@
 # Database Schema Reference
 
-This document describes every table created by the 33 migrations in `backend/migrations/`,
+This document describes every table created by the 47 migrations in `backend/migrations/`,
 their columns, indexes, and relationships.
 
 ---
@@ -354,6 +354,26 @@ This table stores per-user digest frequency settings independently.
 | `updated_at` | `timestamp with time zone` | `NOT NULL, DEFAULT NOW()` | Timestamp of last update |
 
 **Notes**: Tracks global pause state across all Soroban contracts for cross-contract pause coordination.
+
+---
+
+## Table: `auth_challenge_nonces`
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `nonce_hash` | `char(64)` | `PRIMARY KEY` | SHA-256 digest; raw nonce is not persisted |
+| `message_hash` | `char(64)` | `NOT NULL` | Binds redemption to the exact issued challenge message |
+| `public_key` | `varchar(56)` | `NOT NULL` | Wallet the challenge was issued to |
+| `issued_at_ms` | `bigint` | `NOT NULL` | Original challenge timestamp, in milliseconds |
+| `expires_at` | `timestamp with time zone` | `NOT NULL` | Five-minute validity boundary |
+| `consumed_at` | `timestamp with time zone` | | Set atomically on successful login redemption |
+| `created_at` | `timestamp with time zone` | `NOT NULL, DEFAULT NOW()` | |
+
+**Indexes**: primary key on `nonce_hash`; `auth_challenge_nonces_expires_at_idx` on `expires_at`.
+
+**Retention**: expired rows are deleted in batches of at most 500 during challenge
+issuance. Active and consumed challenges remain until expiry so a consumed nonce
+cannot be redeemed again.
 
 ---
 

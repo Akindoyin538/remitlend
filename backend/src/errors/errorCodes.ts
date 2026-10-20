@@ -23,6 +23,7 @@ export enum ErrorCode {
   TOKEN_EXPIRED = 'TOKEN_EXPIRED',
   TOKEN_INVALID = 'TOKEN_INVALID',
   CHALLENGE_EXPIRED = 'CHALLENGE_EXPIRED',
+  CHALLENGE_REPLAYED = 'CHALLENGE_REPLAYED',
 
   // Authorization Errors (403)
   FORBIDDEN = 'FORBIDDEN',
@@ -145,6 +146,13 @@ export const ERROR_CODE_REGISTRY: Record<ErrorCode, ErrorCodeMetadata> = {
     message: 'Challenge has expired',
     httpStatus: 401,
     description: 'The challenge message has expired (valid for 5 minutes)',
+    suggestedAction: 'Request a new challenge and sign it',
+  },
+  [ErrorCode.CHALLENGE_REPLAYED]: {
+    code: ErrorCode.CHALLENGE_REPLAYED,
+    message: 'Challenge is invalid or has already been used',
+    httpStatus: 401,
+    description: 'The challenge was not issued for this wallet or has already been consumed',
     suggestedAction: 'Request a new challenge and sign it',
   },
 

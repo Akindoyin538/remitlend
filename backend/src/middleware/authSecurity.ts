@@ -186,11 +186,12 @@ export async function authSecurityMiddleware(
     
     if (statusCode === 401 || statusCode === 400) {
       const errorBody = typeof body === 'string' ? JSON.parse(body) : body;
-      const errorCode = errorBody?.errorCode || errorBody?.message;
+      const errorCode = errorBody?.error?.code || errorBody?.errorCode || errorBody?.message;
       
       const isAuthFailure = 
         errorCode === 'INVALID_SIGNATURE' ||
         errorCode === 'CHALLENGE_EXPIRED' ||
+        errorCode === 'CHALLENGE_REPLAYED' ||
         errorCode === 'INVALID_CHALLENGE' ||
         errorCode === 'INVALID_PUBLIC_KEY' ||
         (errorBody?.message && (

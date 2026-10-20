@@ -9,6 +9,7 @@ The `services/` layer contains the core business logic of the RemitLend backend.
 | Service                        | Responsibility                                                              | Key Entry Points                                                                                      |
 | ------------------------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | **authService**                | JWT generation/verification, signature validation, challenge flow           | `generateChallenge()`, `verifySignature()`, `generateJwtToken()`, `verifyJwtToken()`, `revokeToken()` |
+| **challengeNonceService**      | PostgreSQL-backed issuance and one-time consumption of signed login challenges | `issueChallenge()`, `consumeChallenge()` |
 | **cacheService**               | Redis wrapper for key-value caching                                         | `get()`, `set()`, `delete()`, `setNotExists()`                                                        |
 | **databaseService**            | User profiles, loan history, indexed events CRUD                            | `UserProfileService.*`, `LoanHistoryService.*`, `IndexedEventsService.*`                              |
 | **eventIndexer**               | Polls Stellar RPC for contract events, stores in PostgreSQL                 | `startIndexing()`, `stopIndexing()` (via IndexerManager)                                              |

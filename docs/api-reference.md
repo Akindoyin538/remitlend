@@ -162,7 +162,10 @@ X-RateLimit-Reset: 1700000000
 
 #### POST /api/v1/auth/challenge
 
-Request a sign-in message for wallet authentication.
+Request a sign-in message for wallet authentication. Each request issues a new
+five-minute challenge; the server persists hashed nonce/message values for
+one-time redemption. POST requests require an `Idempotency-Key` header, but
+challenge responses are not cached.
 
 **Request:**
 ```json
@@ -176,10 +179,10 @@ Request a sign-in message for wallet authentication.
 {
   "success": true,
   "data": {
-    "nonce": "abc123def456",
+    "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "timestamp": 1700000000000,
     "expiresIn": 300000,
-    "message": "Sign this message to authenticate with RemitLend.\n\nNonce: abc123\nTimestamp: 1700000000000\n\nThis request will expire in 5 minutes."
+    "message": "Sign this message to authenticate with RemitLend.\n\nNonce: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nTimestamp: 1700000000000\n\nThis request will expire in 5 minutes."
   }
 }
 ```
@@ -187,12 +190,16 @@ Request a sign-in message for wallet authentication.
 **Errors:**
 - `400 ValidationError` — Missing or invalid public key
 - `429 RateLimitError` — Too many challenge requests
+- `503 SERVICE_UNAVAILABLE` — Challenge persistence is unavailable
 
 ---
 
 #### POST /api/v1/auth/login
 
-Exchange a signed challenge for a JWT token.
+Exchange a signed challenge for a JWT token. The server verifies the signature
+and atomically consumes the exact issued challenge before returning a token.
+POST requests require an `Idempotency-Key` header; login responses are not
+cached, so retrying a consumed challenge requires a new challenge.
 
 **Request:**
 ```json
@@ -215,9 +222,12 @@ Exchange a signed challenge for a JWT token.
 ```
 
 **Errors:**
-- `400 ValidationError` — Invalid signature or expired challenge
-- `401 UnauthorizedError` — Challenge not found or expired
+- `400 ValidationError` — Missing or malformed challenge fields
+- `401 INVALID_SIGNATURE` — Signature does not match the wallet/message
+- `401 CHALLENGE_EXPIRED` — Challenge timestamp is outside its validity window
+- `401 CHALLENGE_REPLAYED` — Challenge was not issued to this wallet or was already used
 - `429 RateLimitError` — Too many login attempts
+- `503 SERVICE_UNAVAILABLE` — Challenge persistence is unavailable; request a new challenge and retry
 
 ---
 

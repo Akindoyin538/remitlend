@@ -25,7 +25,7 @@ const challengeSchema = z.object({
 
 const loginSchema = z.object({
   publicKey: z.string().min(1, 'Public key is required'),
-  message: z.string().min(1, 'Message is required'),
+  message: z.string().min(1, 'Message is required').max(1024),
   signature: z.string().min(1, 'Signature is required'),
 });
 
@@ -34,8 +34,14 @@ const loginSchema = z.object({
  * /auth/challenge:
  *   post:
  *     summary: Request a sign-in message (public)
- *     description: Returns a nonce and message for the wallet to sign. No authentication required.
+ *     description: Returns a database-persisted, five-minute one-time nonce and message for the wallet to sign. No authentication required.
  *     tags: [Auth]
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema:
+ *           type: string
  *     requestBody:
  *       required: true
  *       content:
@@ -54,6 +60,8 @@ const loginSchema = z.object({
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/AuthChallengeResponse'
+ *       503:
+ *         description: Challenge persistence is temporarily unavailable
  */
 router.post('/challenge', challengeRateLimiter, validateBody(challengeSchema), authSecurityMiddleware, requestChallenge);
 
@@ -62,8 +70,14 @@ router.post('/challenge', challengeRateLimiter, validateBody(challengeSchema), a
  * /auth/login:
  *   post:
  *     summary: Exchange signed challenge for JWT (public)
- *     description: Verifies the Ed25519 signature and returns a Bearer token.
+ *     description: Verifies and atomically consumes the issued challenge before returning a Bearer token. Challenges can be used once.
  *     tags: [Auth]
+ *     parameters:
+ *       - in: header
+ *         name: Idempotency-Key
+ *         required: true
+ *         schema:
+ *           type: string
  *     requestBody:
  *       required: true
  *       content:
@@ -86,6 +100,10 @@ router.post('/challenge', challengeRateLimiter, validateBody(challengeSchema), a
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/AuthLoginResponse'
+ *       401:
+ *         description: Invalid signature, expired challenge, or challenge already used
+ *       503:
+ *         description: Challenge persistence is temporarily unavailable
  */
 router.post('/login', ipLoginRateLimiter, loginRateLimiter, validateBody(loginSchema), authSecurityMiddleware, login);
 
