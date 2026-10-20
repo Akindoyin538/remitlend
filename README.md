@@ -1,81 +1,248 @@
-# Handsoff
+# RemitLend
 
-Handsoff is a decentralized lending protocol. This repository contains the
-frontend, API, indexer, and supporting infrastructure for borrower and lender
-critical journeys.
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
+[![Frontend: Next.js](https://img.shields.io/badge/Frontend-Next.js-black?logo=next.js)](https://nextjs.org/)
+[![Backend: Express](https://img.shields.io/badge/Backend-Express.js-white?logo=express)](https://expressjs.com/)
+[![Smart Contracts: Soroban](https://img.shields.io/badge/Smart_Contracts-Soroban-orange)](https://soroban.stellar.org/)
+[![Stellar](https://img.shields.io/badge/Stellar-Soroban-purple)](https://stellar.org)
 
-## Service Level Objectives (SLOs)
+RemitLend treats remittance history as credit history. Migrant workers prove their financial reliability through monthly cross-border transfers, allowing them to receive fair loans without predatory fees. In return, lenders earn transparent yield powered by the Stellar network.
 
-This section defines the service-level indicators (SLIs) and objectives for the
-critical user journeys across the frontend, API, indexer, RPC confirmation, and
-notification dependencies. It is the source of truth for alerting and
-error-budget policy.
+## ✨ Key Features
 
-### Critical journeys
+### For Borrowers
+- **Credit Building**: Convert your existing remittance history into an actionable credit score.
+- **Fair Rates**: Access loans with transparent, non-predatory interest rates.
+- **Self-Custody**: Maintain full control of your assets using Stellar wallets.
 
-- **Borrower — loan request**: a borrower submits a loan request and it is
-  accepted on-chain.
-- **Borrower — loan repayment**: a borrower repays an outstanding loan and the
-  repayment is reflected in the UI.
-- **Lender — inspect eligible funds**: a lender loads the pool and sees eligible
-  funds available to withdraw.
-- **Lender — withdraw**: a lender submits a withdrawal and the funds are
-  reflected in their wallet and in the UI.
+### For Lenders
+- **Transparent Yield**: Earn interest by providing liquidity to audited borrowing pools.
+- **Risk Assessment**: Make informed decisions based on verifiable, on-chain remittance proofs (Remittance NFTs).
 
-### SLI definitions
+### Technical Highlights
+- **NFT-Based Collateral**: Remittance NFTs serve as proof of reliability and loan collateral.
+- **Decentralized Lending Pools**: Lenders provide liquidity and earn transparent yields.
+- **Transparent & Auditable**: All transactions and loan terms recorded on-chain.
 
-Each SLI has a precise event definition, an eligible denominator, and an
-exclusion policy. Latency SLIs are measured separately for **transaction
-submission**, **chain finality**, and **indexer projection lag** so that a slow
-chain or a lagging indexer is not conflated with an application failure.
+## 🏗 Project Structure
 
-| SLI | Event definition | Eligible denominator | Exclusions |
-| --- | --- | --- | --- |
-| `frontend_availability` | Successful page load (HTTP 2xx/3xx) of a journey entry route | All page-load requests to journey entry routes | Synthetic probes, bot traffic, requests from internal IPs |
-| `api_request_success` | API request returns a non-5xx response | All API requests for journey endpoints | Client 4xx (user error), requests rejected by rate limiting |
-| `tx_submission_latency` | Time from user submit to transaction accepted into the mempool | All user-initiated journey transactions | Transactions rejected client-side before submission |
-| `chain_finality_latency` | Time from mempool acceptance to the configured confirmation depth | All submitted journey transactions | Reorged transactions, transactions dropped from the mempool |
-| `indexer_projection_lag` | Time from on-chain finality to the event being queryable via the indexer | All indexed journey events | Events from blocks before the indexer's start height |
-| `notification_delivery` | Notification delivered to the user's channel within the delivery window | All journey notifications enqueued | Notifications suppressed by user preferences |
+The repository is organized as a monorepo containing three core packages:
 
-### Objectives
+- **`backend/`**: Node.js/Express server providing API support, score generation, and metadata management.
+- **`frontend/`**: Next.js web application providing the UI for both borrowers and lenders.
+- **`contracts/`**: Soroban (Rust) smart contracts covering the lending pools, loan management, and NFT collateral logic.
 
-| SLI | Objective | Window |
-| --- | --- | --- |
-| `frontend_availability` | 99.9% | 30 days |
-| `api_request_success` | 99.9% | 30 days |
-| `tx_submission_latency` | p95 < 2s | 30 days |
-| `chain_finality_latency` | p95 < 60s | 30 days |
-| `indexer_projection_lag` | p95 < 30s | 30 days |
-| `notification_delivery` | 99% within 5 minutes | 30 days |
+*For a detailed look at how these components interact, see our [Architecture Diagram](ARCHITECTURE.md).*
+*New contributor? Start with the in-repo wiki: [docs/wiki/README.md](docs/wiki/README.md).*
+*Looking for deployed contract IDs? See [docs/deployed-contracts.md](docs/deployed-contracts.md).*
+*Need the canonical state machine for loans, transactions, remittances, and
+webhooks? See [docs/domain-state-machines.md](docs/domain-state-machines.md).*
+*Reviewing a security-sensitive change? Start from
+[docs/SECURITY-ASSUMPTIONS.md](docs/SECURITY-ASSUMPTIONS.md) (assumptions,
+limitations, and compensating controls).*
 
-### Alerts
+### API Reference
 
-Alerts are tied to user impact. Each alert has an owner, a runbook reference,
-and an actionable threshold. Dashboards separate dependency outages (RPC,
-indexer, notification provider) from application failures and avoid
-high-cardinality labels (no per-user, per-tx-hash, or per-address labels).
+The backend exposes an interactive Swagger UI for exploring and testing API endpoints. Start the backend server (see [Quick Start](#quick-start-with-docker-recommended) or [Manual Setup](#manual-setup)), then open:
 
-| Alert | Condition | Owner | Runbook |
-| --- | --- | --- | --- |
-| `FrontendAvailabilityBurn` | Fast burn: 2% budget in 1h | Frontend on-call | `docs/runbooks/frontend-availability.md` |
-| `ApiRequestSuccessBurn` | Fast burn: 2% budget in 1h | API on-call | `docs/runbooks/api-request-success.md` |
-| `TxSubmissionLatencyHigh` | p95 > 2s for 10m | Protocol on-call | `docs/runbooks/tx-submission-latency.md` |
-| `ChainFinalityLatencyHigh` | p95 > 60s for 15m | Protocol on-call | `docs/runbooks/chain-finality-latency.md` |
-| `IndexerProjectionLagHigh` | p95 > 30s for 10m | Indexer on-call | `docs/runbooks/indexer-projection-lag.md` |
-| `NotificationDeliveryLow` | < 99% within 5m for 30m | Notifications on-call | `docs/runbooks/notification-delivery.md` |
+- **Swagger UI**: [http://localhost:3001/docs](http://localhost:3001/docs)
+- **OpenAPI JSON**: [http://localhost:3001/docs.json](http://localhost:3001/docs.json)
 
-Dependency outages are surfaced on a separate dashboard panel from application
-failures so that an RPC or indexer outage does not page the application on-call
-for an application defect.
+Both endpoints are gated to non-production environments (`NODE_ENV !== "production"`).
 
-### Review cadence and error-budget policy
+### Webhooks
 
-- SLOs are reviewed monthly by the owning teams; targets and exclusions are
-  updated when journeys or dependencies change.
-- When an error budget is exhausted, feature work for the affected journey is
-  paused and reliability work takes priority until the budget recovers.
-- Fast-burn alerts page the owning on-call; slow-burn alerts open a ticket for
-the next business day.
-- Every alert must link to its runbook and have a named owner before it is
-  enabled in production.
+RemitLend supports real-time event notifications via webhooks. See the
+[Webhook Integration Guide](docs/webhooks.md) for details on subscribing,
+event payloads, retry semantics, circuit-breaker behavior, and HMAC signature
+verification.
+
+- **Swagger UI**: [http://localhost:3001/docs](http://localhost:3001/docs)
+- **OpenAPI JSON**: [http://localhost:3001/docs.json](http://localhost:3001/docs.json)
+
+Both endpoints are gated to non-production environments (`NODE_ENV !== "production"`).
+
+## 🛠 Tech Stack
+
+- **Blockchain**: [Stellar](https://stellar.org) (Soroban Smart Contracts)
+- **Frontend**: Next.js 16, React 19, TypeScript, Tailwind CSS
+- **Backend**: Node.js, Express, TypeScript, Jest
+- **Wallet Integration**: [Stellar Wallet Kit](https://github.com/stellar/stellar-wallet-kit) (Freighter)
+
+## 🏁 Getting Started
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) (v18 or higher)
+- [npm](https://www.npmjs.com/) or [yarn](https://yarnpkg.com/)
+- [Docker & Docker Compose](https://www.docker.com/) (Recommended for easy setup)
+- [Rust & Cargo](https://rustup.rs/) (Required for contract development)
+- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup) (Required for contract deployment)
+- [Stellar Wallet](https://www.stellar.org/ecosystem/wallets) (Freighter recommended for testing)
+
+### Quick Start with Docker (Recommended)
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/LabsCrypt/remitlend.git
+   cd remitlend
+   ```
+
+2. **Configure environment:**
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
+   Edit `backend/.env` if needed (defaults work for local development).
+
+3. **Start all services:**
+   ```bash
+   docker compose up --build
+   ```
+   Docker Compose uses healthchecks so services start cleanly:
+   - PostgreSQL (`db`) is marked healthy via `pg_isready`
+   - The backend waits for healthy Postgres before starting, runs `npm run migrate:up`, then starts the API
+   - The backend container is marked healthy by polling `GET /health` every 10 seconds (3 retries)
+
+4. **Access the application:**
+   - Frontend: [http://localhost:3000](http://localhost:3000)
+   - Backend API: [http://localhost:3001](http://localhost:3001)
+   - API Documentation: [http://localhost:3001/docs](http://localhost:3001/docs)
+
+### Manual Setup
+
+#### Backend Setup
+
+1. **Navigate to backend directory:**
+   ```bash
+   cd backend
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Configure environment:**
+   ```bash
+   cp .env.example .env
+   ```
+   Update `.env` with your configuration (at minimum `DATABASE_URL` for PostgreSQL):
+   ```env
+   CORS_ALLOWED_ORIGINS=http://localhost:3000
+   PORT=3001
+   NODE_ENV=development
+   DATABASE_URL=postgres://postgres:postgres@localhost:5432/remitlend
+   ```
+
+4. **Apply database migrations** (creates `scores`, `loan_events`, `indexer_state`, and other tables):
+   ```bash
+   npm run migrate:up
+   ```
+   Migration scripts use the colon form (`migrate:up` / `migrate:down`), which is the standard npm convention.
+
+5. **Run development server:**
+   ```bash
+   npm run dev
+   ```
+
+6. **Available scripts:**
+   - `npm run dev` - Start development server with hot reload
+   - `npm run build` - Build for production
+   - `npm start` - Run production build
+   - `npm test` - Run test suite
+   - `npm run lint` - Check code quality
+   - `npm run format` - Format code with Prettier
+
+#### Frontend Setup
+
+1. **Navigate to frontend directory:**
+   ```bash
+   cd frontend
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Run development server:**
+   ```bash
+   npm run dev
+   ```
+
+4. **Access the application:**
+   Open [http://localhost:3000](http://localhost:3000) in your browser
+
+5. **Available scripts:**
+   - `npm run dev` - Start development server
+   - `npm run build` - Build for production
+   - `npm start` - Run production build
+   - `npm run lint` - Check code quality
+
+#### Smart Contracts Setup
+
+1. **Install Rust and wasm32 target:**
+   ```bash
+   rustup target add wasm32-unknown-unknown
+   ```
+
+2. **Install Soroban CLI:**
+   ```bash
+   cargo install --locked soroban-cli
+   ```
+
+3. **Navigate to contracts directory:**
+   ```bash
+   cd contracts
+   ```
+
+4. **Build all contracts:**
+   ```bash
+   cargo build --target wasm32-unknown-unknown --release
+   ```
+
+5. **Run tests:**
+   ```bash
+   cargo test
+   ```
+
+6. **Deploy to testnet (example):**
+   ```bash
+   soroban contract deploy \
+     --wasm target/wasm32-unknown-unknown/release/remittance_nft.wasm \
+     --source <YOUR_SECRET_KEY> \
+     --rpc-url https://soroban-testnet.stellar.org \
+     --network-passphrase "Test SDF Network ; September 2015"
+   ```
+
+## 🔒 Security
+
+For details on how to report a security vulnerability, please see our [Security Policy](SECURITY.md).
+
+## 🤝 Contributing
+
+We welcome contributions from developers of all skill levels! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on how to get started.
+
+### Environment Variables
+
+See [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) for a full reference of all environment variables across backend, frontend, and scripts. Each `.env.example` file also links to this document.
+
+### Quick Contribution Guide
+
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feat/amazing-feature`).
+3. Make your changes and commit using [Conventional Commits](https://www.conventionalcommits.org/) (`git commit -m 'feat: add amazing feature'`).
+4. Push to your branch (`git push origin feat/amazing-feature`).
+5. Open a Pull Request.
+
+## 📄 License
+
+This project is licensed under the ISC License. See the `LICENSE` file for details.
+
+## Handsoff notes
+
+<!-- handsoff-issue-340 -->
+- #340: frontend: add deterministic wallet and RPC test doubles
+
+<!-- handsoff-issue-535 -->
+- #535: contracts: make pool rate changes continuous and non-retroactive

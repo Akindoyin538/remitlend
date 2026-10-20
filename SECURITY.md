@@ -44,62 +44,52 @@ If you believe you have found a security vulnerability, please reach out to us v
 *   We request a **90-day disclosure window** to give us time to investigate and patch the vulnerability before it is publicly disclosed.
 *   At this time, we do not offer a paid bounty program, but we appreciate and may acknowledge responsible disclosures.
 
-## Dependency Vulnerability Exceptions
+## Donation and Unsolicited-Transfer Reconciliation
 
-Automated dependency scans may surface advisories we choose to accept rather
-than fix immediately. An accepted risk without an owner, rationale, and expiry
-becomes a permanent blind spot, so every exception is tracked in a
-machine-readable register and expires by default.
+Contracts may receive value that was not initiated through a tracked
+application flow (direct transfers, donations, or airdropped tokens). These
+inflows are treated as **untrusted** until explicitly classified and
+reconciled by an authorized operator.
 
-### Exception register
+### Authorization
 
-The register lives at [`security/dependency-exceptions.json`](security/dependency-exceptions.json)
-and is the single source of truth consumed by the dependency and supply-chain
-workflows. Each entry is keyed by package and advisory and must include:
+*   Only accounts holding the reconciliation role (see
+    [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md)) may classify or
+    reconcile an unsolicited transfer.
+*   Unauthorized callers must fail closed with an explicit authorization
+    error; no state is mutated and no funds are moved.
+*   Classification and reconciliation are separate, auditable actions.
 
-| Field                 | Required | Description |
-| --------------------- | -------- | ----------- |
-| `package`             | yes      | Affected package name (including transitive packages). |
-| `advisory`            | yes      | Advisory identifier (e.g. `GHSA-xxxx-xxxx-xxxx` or `CVE-YYYY-NNNNN`). |
-| `affectedVersion`     | yes      | Version range or resolved version the exception applies to. |
-| `compensatingControl` | yes      | Control that reduces the risk while the exception is open. |
-| `owner`               | yes      | Accountable individual or team. Unowned entries fail the gate. |
-| `rationale`           | yes      | Risk rationale for accepting rather than fixing. |
-| `remediationTarget`   | yes      | Target date or release by which the dependency is fixed or removed. |
-| `expires`             | yes      | Expiration date. Must not exceed the maximum expiry window. |
-| `reviewHistory`       | no       | Append-only renewal/review records. |
+### Validation and resource bounds
 
-### Lifecycle rules
+*   Transfer references, amounts, and classification values are validated
+    before any state change; malformed or out-of-range inputs are rejected.
+*   Reconciliation is processed in bounded batches with an explicit maximum
+    iteration count to prevent unbounded gas/resource consumption.
+*   Amounts are derived from authoritative on-chain state, never from
+    caller-supplied totals.
 
-*   **New exceptions** must supply an owner, risk rationale, remediation
-target, and an expiration. Entries missing any required field are rejected.
-*   **Maximum expiry** is **90 days** from the date the exception is created.
-An exception may not be created with an expiration beyond that window.
-*   **Expired or unowned exceptions fail the security gate.** CI treats an
-expired `expires` date or a missing/blank `owner` as a blocking failure.
-*   **Renewals are auditable.** Renewing an exception appends a record to
-`reviewHistory` with the reviewer, date, and justification; existing history
-is never overwritten.
+### Compatibility
 
-### CI behavior
+*   Reconciliation controls are additive: no existing function signatures or
+    storage layouts are changed, preserving compatibility with deployed
+    contracts and persisted data.
 
-Dependency and supply-chain checks read the register and the lockfile to
-differentiate dependency paths:
+### Observability
 
-*   **fixed** — the advisory is resolved by the locked version; no exception needed.
-*   **affected** — the locked version is in range; a valid, unexpired exception is required.
-*   **not-applicable** — the advisory does not apply to the resolved path.
+*   Classification and reconciliation emit structured events (actor,
+    transfer reference, amount, classification, outcome) for audit and
+    operational diagnostics.
+*   Failure paths (authorization, validation, dependency failure) emit
+    distinct structured errors to support retries and alerting.
 
-Reports include the transitive package path for each finding and never
-suppress unrelated advisories; an exception only covers the specific
-package/advisory pair it names.
+### Threat model notes
 
-### Escalation and emergency exceptions
-
-*   **Escalation:** an exception approaching expiry without a fix is escalated
-to the owner and the security lead before the expiration date. Unresolved
-exceptions are not silently renewed.
-*   **Emergency exceptions:** when a fix is not possible before expiry, an
-emergency exception may be granted with a shorter window (maximum **30 days**),
-a named owner, and a documented compensating control. Emergency exceptions
-follow the same register format and are reviewed at the next security review.
+*   An attacker may attempt to spoof a donation to influence accounting or
+    inflate reported balances. Mitigation: unsolicited inflows are quarantined
+    as unclassified and excluded from authoritative balances until reconciled.
+*   An attacker may attempt to grief reconciliation by flooding unsolicited
+    transfers. Mitigation: bounded batch sizes and iteration limits cap the
+    work per reconciliation call.
+*   An unauthorized caller may attempt to reclassify transfers. Mitigation:
+    role-gated authorization with fail-closed behavior and audit events.
