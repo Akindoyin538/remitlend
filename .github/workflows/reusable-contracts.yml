@@ -50,6 +50,9 @@ jobs:
       - name: Formal verification (loan_manager invariants)
         run: cargo test -p loan_manager formal_verification -- --test-threads=1 --nocapture
         working-directory: contracts
+      - name: Share-price rounding policy tests
+        run: cargo test -p vault rounding -- --test-threads=1 --nocapture
+        working-directory: contracts
       - name: Build contracts for wasm32 and enforce size budget
         run: |
           set -euo pipefail
