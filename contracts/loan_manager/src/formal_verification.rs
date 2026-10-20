@@ -14,6 +14,7 @@
 //!   INV-5  Accrued interest / late fees are non-negative at every ledger time.
 //!   INV-6  Credit score is always non-negative.
 //!   INV-7  Requests above `max_loan_amount` are rejected up-front.
+//!   INV-8  Interest equals the closed-form formula, remainder carried exactly.
 //!
 //! CI runs this module as a dedicated gate (see the "Formal verification"
 //! step in `.github/workflows/ci.yml`).
@@ -252,4 +253,32 @@ fn inv7_requests_above_max_are_rejected() {
     // The boundary value is still accepted.
     let ok = manager.request_loan(&borrower, &5_000, &TERM);
     assert_eq!(manager.get_loan(&ok).amount, 5_000);
+}
+
+// INV-8: interest is exactly floor(principal * rate_bps * elapsed / (10_000 * term)),
+// with the sub-unit remainder carried in `interest_residual` so that no value is
+// lost or created.
+#[test]
+fn inv8_interest_calculation_is_exact() {
+    let env = Env::default();
+    let (manager, nft, pool, token) = setup(&env);
+    mint(&env, &token, &pool, 20_000);
+    let borrower = borrower_with_score(&env, &nft, 700);
+
+    let loan_id = manager.request_loan(&borrower, &10_000, &TERM);
+    manager.approve_loan(&loan_id);
+
+    let start = manager.get_loan(&loan_id);
+    let rate = start.interest_rate_bps as i128;
+    let precision: i128 = 1_000_000;
+    let denominator = 10_000i128 * TERM as i128;
+
+    for elapsed in [1u32, 777, 5_000] {
+        env.ledger()
+            .set_sequence_number(start.last_interest_ledger + elapsed);
+        let loan = manager.get_loan(&loan_id);
+        let scaled = 10_000i128 * rate * elapsed as i128 * precision / denominator;
+        assert_eq!(loan.accrued_interest, scaled / precision);
+        assert_eq!(loan.interest_residual, scaled % precision);
+    }
 }
