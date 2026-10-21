@@ -246,3 +246,6 @@ This project is licensed under the ISC License. See the `LICENSE` file for detai
 
 <!-- handsoff-issue-535 -->
 - #535: contracts: make pool rate changes continuous and non-retroactive
+
+<!-- handsoff-issue-532 -->
+- #532: contracts: enforce utilization and reserve limits without breaking pool solvency
