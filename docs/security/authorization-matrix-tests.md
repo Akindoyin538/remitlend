@@ -89,3 +89,26 @@ assertions will flip).
 - [docs/SECURITY-MODEL.md](../SECURITY-MODEL.md) — authoritative route/scope table.
 - [docs/security/privileged-action-approval-policy.md](privileged-action-approval-policy.md) — policy for admin routes.
 - [docs/security/data-retention-matrix.md](data-retention-matrix.md) — which data these routes protect.
+
+---
+
+## 7. Resource-level matrix and route inventory (#519)
+
+Role checks alone do not stop a borrower substituting another user's identifier, so
+`backend/src/__tests__/resourceAuthorizationMatrix.test.ts` adds ownership probes driven by
+`backend/src/__tests__/fixtures/routeAuthorizationInventory.ts`.
+
+- Every route in the user-resource route files (loans, remittances, notifications, user, score,
+  pool, transactions, events) has an inventory entry with allowed roles and an ownership rule
+  (`loan-owner`, `loan-borrower`, `wallet-param`, `sender-record`, `self`, `none`).
+  Other route files are listed in `EXEMPT_ROUTE_FILES` with a reason.
+- **CI guard:** the test scans `src/routes/*.ts` and fails if a route has no inventory entry or
+  exemption, or if an inventory entry no longer maps to a route. Adding a route therefore means
+  adding an entry (and, for owned resources, the probes run automatically).
+- **Non-disclosure:** a foreign loan or remittance returns the same `404` body as a missing one.
+  Wallet-keyed endpoints (`/borrower/:borrower`, `/score/:userId`, `/pool/depositor/:address`)
+  return `403`, which reveals nothing because every wallet address is a valid identifier.
+- **GraphQL:** `src/graphql` is not mounted in `app.ts`; the test asserts this so any future mount
+  must add authorization tests for nested paths first.
+- Cross-tenant: the service has a single tenant per wallet, so cross-wallet probes cover
+  cross-tenant access.

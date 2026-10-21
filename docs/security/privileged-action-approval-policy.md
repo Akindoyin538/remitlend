@@ -249,3 +249,29 @@ Review triggers:
 - Annual review.
 
 Owner: Security team.  Last reviewed: 2026-09-24.
+
+---
+
+## Technical enforcement (#520)
+
+Two Category A actions are enforced in code by `backend/src/services/privilegedActionService.ts`
+(table `privileged_action_requests`): `contract_config_change` (submits a pre-signed contract
+configuration transaction) and `reconciliation_resolution` (resolving a discrepancy from the
+ledger; `POST /admin/discrepancies/:id/resolve` now opens a request instead of resolving directly).
+
+Flow (all admin JWT, `/admin/privileged-actions`):
+
+1. `POST /` opens a request and returns `payloadHash` (sha256 of action type + canonical payload,
+   keys sorted) and `expiresAt` (default 1 hour).
+2. A **different** admin reviews the payload and calls `POST /:id/approve` with that `payloadHash`.
+   Self-approval, a mismatched hash, an expired or non-pending request are rejected (the database
+   also enforces `approver <> initiator`).
+3. `POST /:id/execute` (initiator or approver) atomically claims the request
+   (`approved` -> `executing`, unexpired, hash still matches the stored payload). A replay or
+   concurrent call fails the claim, so the action is submitted once. The transaction hash (or the
+   failure message) is stored in `execution_ref` / `execution_error`. A failed action needs a new
+   request and a new approval.
+4. `POST /:id/revoke` (initiator or approver) cancels a pending or approved request.
+
+Every request, approval, revocation and execution writes an `audit_logs` row
+(`DUAL_CONTROL_*`) with the actor.

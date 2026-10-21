@@ -1,13 +1,12 @@
 import { query } from '../db/connection.js';
 import { AppError } from '../errors/AppError.js';
-import { ErrorCode } from '../errors/errorCodes.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 
 /**
  * After `requireJwtAuth`, ensures `req.params.loanId` refers to a loan whose
  * borrower matches the JWT `publicKey`.
- * Returns 404 when the loan is missing and 403 when it belongs to a different
- * borrower.
+ * Returns 404 both when the loan is missing and when it belongs to a different
+ * borrower, so existence is not revealed.
  */
 export const requireLoanBorrowerAccess = asyncHandler(async (req, _res, next) => {
   const loanId = req.params.loanId;
@@ -33,7 +32,8 @@ export const requireLoanBorrowerAccess = asyncHandler(async (req, _res, next) =>
     throw AppError.notFound('Loan not found');
   }
   if (row.address !== pk) {
-    throw AppError.forbidden('You are not authorized to access this loan', ErrorCode.ACCESS_DENIED);
+    // Same response as a missing loan so callers cannot probe for existence (#519).
+    throw AppError.notFound('Loan not found');
   }
 
   next();
@@ -68,7 +68,8 @@ export const requireLoanOwner = asyncHandler(async (req, _res, next) => {
 
   const loanOwner = row.address;
   if (loanOwner !== pk) {
-    throw AppError.forbidden('You are not authorized to access this loan', ErrorCode.ACCESS_DENIED);
+    // Same response as a missing loan so callers cannot probe for existence (#519).
+    throw AppError.notFound('Loan not found');
   }
 
   next();
