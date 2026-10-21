@@ -196,3 +196,27 @@ This implementation addresses:
 - #172: API changes break the UI without warning
 - #173: No automated contract validation
 - #174: Missing runtime response validation
+## Deprecation Window and Removal Evidence
+
+Legacy `/api/*` routes (superseded by `/api/v1/*`) respond with `Deprecation: true`,
+a `Sunset` date (override with `API_LEGACY_SUNSET`), and
+`Link: </api/v1>; rel="successor-version"`.
+
+Usage telemetry: counter `deprecated_api_requests_total{route, client_version}`.
+`route` is the matched route template (never raw paths, so no wallet addresses or ids;
+unmatched requests are `unmatched`). `client_version` is the `major.minor` of the optional
+`X-Client-Version` header; invalid values become `other`, missing become `unknown`, and at most
+20 distinct cohorts are tracked per process. No tokens or user identifiers are recorded.
+
+Active usage over an observation window (e.g. 30d):
+
+```promql
+sum by (route, client_version) (increase(deprecated_api_requests_total[30d])) > 0
+```
+
+Removal gate for public financial APIs:
+1. Deprecation headers have been live for at least 90 days and the Sunset date has passed.
+2. The query above shows zero requests for the route over a full observation window (default 30 days),
+   with no `unknown`/`other` cohort traffic remaining on it.
+3. Remaining cohorts, if any, were notified and confirmed migrated; evidence is attached to the removal PR.
+4. Contract tests for the successor route pass, and a rollback plan exists.

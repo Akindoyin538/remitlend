@@ -8,6 +8,7 @@ import {
   dbPoolRejectedCounter,
 } from '../middleware/metrics.js';
 import logger from '../utils/logger.js';
+import { abortable, throwIfAborted } from '../utils/requestDeadline.js';
 
 export type { PoolClient };
 
