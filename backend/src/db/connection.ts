@@ -1,5 +1,12 @@
 import pg, { type PoolClient } from 'pg';
-import { recordDbQueryDuration } from '../middleware/metrics.js';
+import {
+  recordDbQueryDuration,
+  dbPoolWaitDurationHistogram,
+  dbPoolSaturationGauge,
+  dbPoolWaitingGauge,
+  dbPoolTimeoutsCounter,
+  dbPoolRejectedCounter,
+} from '../middleware/metrics.js';
 import logger from '../utils/logger.js';
 import { abortable, throwIfAborted } from '../utils/requestDeadline.js';
 
@@ -15,7 +22,10 @@ const idleTimeoutMillis = process.env.DB_IDLE_TIMEOUT_MS
   : 30000;
 const connectionTimeoutMillis = process.env.DB_CONN_TIMEOUT_MS
   ? parseInt(process.env.DB_CONN_TIMEOUT_MS, 10)
-  : 10000;
+  : 5000; // bounded pool wait deadline (also the connect timeout)
+const maxWaitingRequests = process.env.DB_POOL_MAX_WAITING
+  ? parseInt(process.env.DB_POOL_MAX_WAITING, 10)
+  : maxPoolSize * 5;
 const statementTimeoutMillis = process.env.DB_STATEMENT_TIMEOUT_MS
   ? parseInt(process.env.DB_STATEMENT_TIMEOUT_MS, 10)
   : 30000;
@@ -29,6 +39,45 @@ const pool = new Pool({
 });
 
 let isShuttingDown = false;
+
+/** Raised when the pool cannot serve a request within its bounded limits. */
+export class PoolSaturatedError extends Error {
+  readonly retryAfterSeconds: number;
+  constructor(reason: 'queue_full' | 'wait_timeout') {
+    super(`Database pool saturated (${reason})`);
+    this.name = 'PoolSaturatedError';
+    this.retryAfterSeconds = Math.max(1, Math.ceil(connectionTimeoutMillis / 1000));
+  }
+}
+
+const updatePoolGauges = () => {
+  dbPoolSaturationGauge.set((pool.totalCount - pool.idleCount) / maxPoolSize);
+  dbPoolWaitingGauge.set(pool.waitingCount);
+};
+
+// Reject immediately when the wait queue is full so memory and sockets stay bounded.
+const admit = () => {
+  updatePoolGauges();
+  if (
+    pool.totalCount >= maxPoolSize &&
+    pool.idleCount === 0 &&
+    pool.waitingCount >= maxWaitingRequests
+  ) {
+    dbPoolRejectedCounter.inc();
+    throw new PoolSaturatedError('queue_full');
+  }
+};
+
+const isAcquireTimeout = (err: unknown) =>
+  err instanceof Error && /timeout exceeded when trying to connect/i.test(err.message);
+
+const noteAcquireError = (err: unknown): never => {
+  if (isAcquireTimeout(err)) {
+    dbPoolTimeoutsCounter.inc();
+    throw new PoolSaturatedError('wait_timeout');
+  }
+  throw err;
+};
 
 // Periodic pool health metrics logging
 const metricsInterval = setInterval(() => {
@@ -163,12 +212,12 @@ export const query = async (text: string, params?: unknown[]) => {
     throw new Error('Database pool is shutting down');
   }
   checkExhaustion();
+  admit();
   // Captured before the first await so the stack trace points at the calling code
   const callSite = new Error('Slow query call site').stack;
   return withRetry(async () => {
     const start = Date.now();
-    throwIfAborted();
-    const result = await abortable(pool.query(text, params));
+    const result = await pool.query(text, params).catch(noteAcquireError);
     const duration = Date.now() - start;
     const { operation, table } = describeQuery(text);
     recordDbQueryDuration(duration / 1000, operation, table);
@@ -194,9 +243,16 @@ export const getClient = async () => {
     throw new Error('Database pool is shutting down');
   }
   checkExhaustion();
+  admit();
   return withRetry(async () => {
-    const client = await pool.connect();
-    return client;
+    const waitStart = Date.now();
+    try {
+      return await pool.connect();
+    } catch (err) {
+      return noteAcquireError(err);
+    } finally {
+      dbPoolWaitDurationHistogram.observe((Date.now() - waitStart) / 1000);
+    }
   });
 };
 

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireApiKey } from '../middleware/auth.js';
-import { requireJwtAuth, requireRoles } from '../middleware/jwtAuth.js';
+import { requireJwtAuth, requireRoles, requireScopes } from '../middleware/jwtAuth.js';
 import { strictRateLimiter } from '../middleware/rateLimiter.js';
 import { validateBody } from '../middleware/validation.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -11,10 +11,13 @@ import {
   createWebhookSubscription,
   deleteWebhookSubscription,
   getWebhookDeliveries,
+  listWebhookDeadLetters,
+  redriveWebhookDelivery,
   listQuarantinedEvents,
   listWebhookSubscriptions,
   reprocessQuarantinedEvents,
   reindexLedgerRange,
+  updateWebhookSubscription,
 } from '../controllers/indexerController.js';
 import {
   listLoanDisputes,
@@ -32,6 +35,16 @@ import {
   listLoanStateEventsEndpoint,
   replayLoanStateEndpoint,
 } from '../controllers/loanStateEventController.js';
+
+import { listDiscrepancies } from '../services/discrepancyLedgerService.js';
+import {
+  createRequest as createPrivilegedRequest,
+  approveRequest as approvePrivilegedRequest,
+  revokeRequest as revokePrivilegedRequest,
+  executeRequest as executePrivilegedRequest,
+  getRequest as getPrivilegedRequest,
+} from '../services/privilegedActionService.js';
+import { AppError } from '../errors/AppError.js';
 
 const router = Router();
 
@@ -357,7 +370,7 @@ router.post(
  *     summary: Register a webhook subscription
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -384,7 +397,8 @@ router.post(
  */
 router.post(
   '/webhooks',
-  requireApiKey('admin:webhooks'),
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
   strictRateLimiter,
   auditLog,
   createWebhookSubscription,
@@ -397,7 +411,7 @@ router.post(
  *     summary: List webhook subscriptions
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     responses:
  *       200:
  *         description: List of subscriptions
@@ -406,7 +420,7 @@ router.post(
  *             schema:
  *               $ref: '#/components/schemas/WebhookSubscriptionListResponse'
  */
-router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscriptions);
+router.get('/webhooks', requireJwtAuth, requireScopes('read:webhooks'), listWebhookSubscriptions);
 
 /**
  * @swagger
@@ -415,7 +429,7 @@ router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscription
  *     summary: Remove a webhook subscription
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -432,10 +446,26 @@ router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscription
  */
 router.delete(
   '/webhooks/:id',
-  requireApiKey('admin:webhooks'),
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
   strictRateLimiter,
   auditLog,
   deleteWebhookSubscription,
+);
+
+router.put(
+  '/webhooks/:id',
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
+  strictRateLimiter,
+  auditLog,
+  updateWebhookSubscription,
+);
+router.get(
+  '/webhooks/:id/audit',
+  requireJwtAuth,
+  requireScopes('read:webhooks'),
+  getWebhookSubscriptionAudit,
 );
 
 /**
@@ -445,7 +475,7 @@ router.delete(
  *     summary: View webhook delivery history
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -466,7 +496,12 @@ router.delete(
  *             schema:
  *               $ref: '#/components/schemas/WebhookDeliveriesResponse'
  */
-router.get('/webhooks/:id/deliveries', requireApiKey('admin:webhooks'), getWebhookDeliveries);
+router.get(
+  '/webhooks/:id/deliveries',
+  requireJwtAuth,
+  requireScopes('read:webhooks'),
+  getWebhookDeliveries,
+);
 
 /**
  * @swagger
@@ -494,6 +529,195 @@ router.get(
     `);
 
     res.json(result.rows[0]);
+  }),
+);
+
+/**
+ * @swagger
+ * /admin/webhooks/dead-letters:
+ *   get:
+ *     summary: List dead-lettered webhook deliveries (redacted)
+ *     tags: [Admin]
+ *     responses:
+ *       200:
+ *         description: Dead-lettered deliveries
+ */
+router.get(
+  '/webhooks/dead-letters',
+  requireJwtAuth,
+  requireRoles('admin'),
+  asyncHandler(listWebhookDeadLetters),
+);
+
+/**
+ * @swagger
+ * /admin/webhooks/deliveries/{deliveryId}/redrive:
+ *   post:
+ *     summary: Re-drive a dead-lettered webhook delivery
+ *     description: Takes no body. Target URL and payload cannot be changed.
+ *     tags: [Admin]
+ *     responses:
+ *       202:
+ *         description: Delivery re-queued with an incremented generation
+ *       409:
+ *         description: Delivery is not dead-lettered
+ */
+router.post(
+  '/webhooks/deliveries/:deliveryId/redrive',
+  requireJwtAuth,
+  requireRoles('admin'),
+  strictRateLimiter,
+  auditLog,
+  asyncHandler(redriveWebhookDelivery),
+);
+
+/**
+ * @swagger
+ * /admin/discrepancies:
+ *   get:
+ *     summary: Read-only view of the reconciliation discrepancy ledger
+ *     tags: [Admin]
+ *     responses:
+ *       200:
+ *         description: Discrepancy records
+ */
+router.get(
+  '/discrepancies',
+  requireJwtAuth,
+  requireRoles('admin'),
+  asyncHandler(async (req, res) => {
+    const limit = Number(req.query.limit);
+    const rows = await listDiscrepancies({
+      ...(typeof req.query.status === 'string' ? { status: req.query.status } : {}),
+      ...(typeof req.query.severity === 'string' ? { severity: req.query.severity } : {}),
+      ...(Number.isInteger(limit) && limit > 0 ? { limit } : {}),
+    });
+    res.json({ success: true, data: { discrepancies: rows } });
+  }),
+);
+
+const resolveDiscrepancySchema = z.object({
+  reason: z.string().min(10),
+  evidence: z.record(z.string(), z.unknown()),
+});
+
+/**
+ * @swagger
+ * /admin/discrepancies/{id}/resolve:
+ *   post:
+ *     summary: Request resolution of a discrepancy (dual control, no financial correction)
+ *     description: >
+ *       Creates a privileged action request; a second admin must approve it and
+ *       it must then be executed via /admin/privileged-actions/{id}/execute.
+ *     tags: [Admin]
+ *     responses:
+ *       202:
+ *         description: Approval request created
+ */
+router.post(
+  '/discrepancies/:id/resolve',
+  requireJwtAuth,
+  requireRoles('admin'),
+  // Separate credential from the read-only view: resolution needs the scoped key too.
+  requireApiKey('admin:reconciliation'),
+  strictRateLimiter,
+  validateBody(resolveDiscrepancySchema),
+  asyncHandler(async (req, res) => {
+    const created = await createPrivilegedRequest({
+      actionType: 'reconciliation_resolution',
+      payload: {
+        discrepancyId: Number(req.params.id),
+        reason: req.body.reason,
+        evidence: req.body.evidence,
+      },
+      initiator: req.user!.publicKey,
+    });
+    res.status(202).json({ success: true, data: created });
+  }),
+);
+
+const createPrivilegedActionSchema = z.object({
+  actionType: z.string().min(1),
+  payload: z.record(z.string(), z.unknown()),
+});
+const approvePrivilegedActionSchema = z.object({ payloadHash: z.string().length(64) });
+
+const privilegedId = (value: string | undefined): number => {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) throw AppError.badRequest('Invalid request id');
+  return id;
+};
+
+/**
+ * @swagger
+ * /admin/privileged-actions:
+ *   post:
+ *     summary: Open a dual-control request for a high-impact action
+ *     tags: [Admin]
+ *     responses:
+ *       202:
+ *         description: Request created; a different admin must approve it
+ */
+router.post(
+  '/privileged-actions',
+  requireJwtAuth,
+  requireRoles('admin'),
+  strictRateLimiter,
+  validateBody(createPrivilegedActionSchema),
+  asyncHandler(async (req, res) => {
+    const created = await createPrivilegedRequest({
+      actionType: req.body.actionType,
+      payload: req.body.payload,
+      initiator: req.user!.publicKey,
+    });
+    res.status(202).json({ success: true, data: created });
+  }),
+);
+
+router.get(
+  '/privileged-actions/:id',
+  requireJwtAuth,
+  requireRoles('admin'),
+  asyncHandler(async (req, res) => {
+    res.json({ success: true, data: await getPrivilegedRequest(privilegedId(req.params.id)) });
+  }),
+);
+
+router.post(
+  '/privileged-actions/:id/approve',
+  requireJwtAuth,
+  requireRoles('admin'),
+  strictRateLimiter,
+  validateBody(approvePrivilegedActionSchema),
+  asyncHandler(async (req, res) => {
+    await approvePrivilegedRequest(
+      privilegedId(req.params.id),
+      req.user!.publicKey,
+      req.body.payloadHash,
+    );
+    res.json({ success: true });
+  }),
+);
+
+router.post(
+  '/privileged-actions/:id/revoke',
+  requireJwtAuth,
+  requireRoles('admin'),
+  strictRateLimiter,
+  asyncHandler(async (req, res) => {
+    await revokePrivilegedRequest(privilegedId(req.params.id), req.user!.publicKey);
+    res.json({ success: true });
+  }),
+);
+
+router.post(
+  '/privileged-actions/:id/execute',
+  requireJwtAuth,
+  requireRoles('admin'),
+  strictRateLimiter,
+  asyncHandler(async (req, res) => {
+    const result = await executePrivilegedRequest(privilegedId(req.params.id), req.user!.publicKey);
+    res.status(result.status === 'executed' ? 200 : 502).json({ success: true, data: result });
   }),
 );
 

@@ -9,7 +9,6 @@ jest.unstable_mockModule('../../db/connection.js', () => ({
 
 const { requireLoanOwner } = await import('../loanAccess.js');
 const { AppError } = await import('../../errors/AppError.js');
-const { ErrorCode } = await import('../../errors/errorCodes.js');
 
 const OWNER_PK = 'GOWNERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const ATTACKER_PK = 'GATTACKERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -50,7 +49,7 @@ describe('requireLoanOwner (#1365 IDOR)', () => {
     expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('loan_events'), ['loan-1']);
   });
 
-  it('rejects a different caller with 403 — compares loan owner to caller, not caller to itself', async () => {
+  it('rejects a different caller with 404 (same as missing) — compares loan owner to caller, not caller to itself', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ address: OWNER_PK }] });
 
     const { error } = await runRequireLoanOwner({
@@ -60,8 +59,8 @@ describe('requireLoanOwner (#1365 IDOR)', () => {
 
     expect(error).toBeInstanceOf(AppError);
     const appError = error as InstanceType<typeof AppError>;
-    expect(appError.statusCode).toBe(403);
-    expect(appError.errorCode).toBe(ErrorCode.ACCESS_DENIED);
+    expect(appError.statusCode).toBe(404);
+    expect(appError.message).toBe('Loan not found');
 
     // Previous IDOR was `if (pk !== pk)` which never forbids any caller.
     expect(OWNER_PK).not.toBe(ATTACKER_PK);

@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
-import { query } from '../db/connection.js';
+import { query, withTransaction } from '../db/connection.js';
 import logger from '../utils/logger.js';
 import { getOutboundTraceparent } from '../utils/requestContext.js';
+import { sendWebhookRequest } from './webhookEgress.js';
 
 // #1520 — this array is the single source of truth for which event types
 // external webhook subscribers can register for. docs/webhooks.md's
@@ -97,6 +98,7 @@ export interface IndexedLoanEvent {
 
 export interface WebhookSubscription {
   id: number;
+  ownerPublicKey: string;
   callbackUrl: string;
   eventTypes: WebhookEventType[];
   secret?: string;
@@ -246,6 +248,7 @@ async function postWebhook(
   callbackUrl: string,
   body: string,
   signature: string | undefined,
+  identity?: { eventId?: string; generation?: number },
 ): Promise<Response> {
   const timeoutMs = getWebhookRequestTimeoutMs();
   const controller = new AbortController();
@@ -259,6 +262,13 @@ async function postWebhook(
         'content-type': 'application/json',
         // Continue the retry's trace context into the subscriber's logs (#414).
         traceparent: getOutboundTraceparent(),
+        // Stable identity for consumer-side deduplication (#517). The event ID
+        // never changes across retries or operator re-drives; the generation
+        // increments on each re-drive.
+        ...(identity?.eventId && { 'x-remitlend-event-id': identity.eventId }),
+        ...(identity?.generation !== undefined && {
+          'x-remitlend-delivery-generation': String(identity.generation),
+        }),
         // X-RemitLend-Signature uses the GitHub/Stripe-style "sha256=<hex>"
         // format so subscribers can verify payload integrity (see
         // docs/wiki/webhook-signatures.md for the verification recipe).
@@ -289,6 +299,17 @@ export const getRetryDelayMs = (attemptNumber: number): number => {
   return RETRY_DELAYS_MS[delayIndex] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]!;
 };
 
+/**
+ * Produces a short failure summary that is safe to store and expose to
+ * operators: URLs, long tokens and anything past 200 chars are removed.
+ */
+export function redactFailureSummary(message: string): string {
+  return message
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/[A-Za-z0-9+/=_-]{32,}/g, '[redacted]')
+    .slice(0, 200);
+}
+
 export class WebhookService {
   // Retry processor that polls for pending retries
   static async processRetries(): Promise<void> {
@@ -298,13 +319,14 @@ export class WebhookService {
       const now = new Date();
       const result = await query(
         `SELECT id, subscription_id, callback_url, secret, event_id, event_type, 
-                payload, attempt_count
+                payload, attempt_count, delivery_generation
          FROM webhook_deliveries wd
          JOIN webhook_subscriptions ws ON wd.subscription_id = ws.id
-         WHERE wd.delivered_at IS NULL 
+         WHERE wd.delivered_at IS NULL
            AND wd.next_retry_at IS NOT NULL
            AND wd.next_retry_at <= $1
            AND wd.attempt_count < $2
+           AND wd.dead_lettered_at IS NULL
          ORDER BY wd.next_retry_at ASC
          LIMIT 100`,
         [now, MAX_RETRY_ATTEMPTS],
@@ -327,6 +349,7 @@ export class WebhookService {
           event_type: string;
           payload: Record<string, unknown>;
           attempt_count: number;
+          delivery_generation?: number;
         };
         // Defensive circuit breaker: the SQL filter above already excludes
         // deliveries at the retry ceiling, but guard here too so a delivery
@@ -343,6 +366,7 @@ export class WebhookService {
           delivery.event_type as WebhookEventType,
           delivery.payload,
           delivery.attempt_count,
+          Number(delivery.delivery_generation ?? 1),
         );
       }
     } catch (error) {
@@ -359,6 +383,7 @@ export class WebhookService {
     _eventType: WebhookEventType,
     payload: Record<string, unknown>,
     attemptCount: number,
+    generation: number = 1,
   ): Promise<void> {
     const preparedPayload = prepareWebhookPayload(payload);
     const body = preparedPayload.body;
@@ -370,7 +395,7 @@ export class WebhookService {
     let response: Response | null = null;
 
     try {
-      response = await postWebhook(callbackUrl, body, signature);
+      response = await postWebhook(callbackUrl, body, signature, { eventId, generation });
 
       const successful = response.ok;
       const newAttemptCount = attemptCount + 1;
@@ -409,9 +434,20 @@ export class WebhookService {
                last_status_code = $2, 
                last_error = $3,
                next_retry_at = $4,
-               updated_at = $5
+               updated_at = $5,
+               dead_lettered_at = $7,
+               dead_letter_reason = $8
            WHERE id = $6`,
-          [newAttemptCount, response.status, errorMsg, nextRetryTime, new Date(), deliveryId],
+          [
+            newAttemptCount,
+            response.status,
+            errorMsg,
+            nextRetryTime,
+            new Date(),
+            deliveryId,
+            nextRetryTime ? null : new Date(),
+            nextRetryTime ? null : redactFailureSummary(errorMsg),
+          ],
         );
 
         if (nextRetryTime) {
@@ -448,9 +484,19 @@ export class WebhookService {
          SET attempt_count = $1, 
              last_error = $2,
              next_retry_at = $3,
-             updated_at = $4
+             updated_at = $4,
+             dead_lettered_at = $6,
+             dead_letter_reason = $7
          WHERE id = $5`,
-        [newAttemptCount, errorMsg, nextRetryTime, new Date(), deliveryId],
+        [
+          newAttemptCount,
+          errorMsg,
+          nextRetryTime,
+          new Date(),
+          deliveryId,
+          nextRetryTime ? null : new Date(),
+          nextRetryTime ? null : redactFailureSummary(errorMsg),
+        ],
       );
 
       if (nextRetryTime) {
@@ -473,54 +519,220 @@ export class WebhookService {
       }
     }
   }
+
+  /**
+   * Lists dead-lettered deliveries (retry exhausted, never delivered).
+   * The payload is intentionally not returned; only identity and a redacted
+   * failure summary are exposed.
+   */
+  static async listDeadLetters(limit: number = 50): Promise<Array<Record<string, unknown>>> {
+    const result = await query(
+      `SELECT id, subscription_id, event_id, event_type, attempt_count, delivery_generation,
+              last_status_code, dead_letter_reason, dead_lettered_at,
+              last_redriven_at, last_redriven_by
+       FROM webhook_deliveries
+       WHERE dead_lettered_at IS NOT NULL AND delivered_at IS NULL
+       ORDER BY dead_lettered_at DESC
+       LIMIT $1`,
+      [limit],
+    );
+    return result.rows as Array<Record<string, unknown>>;
+  }
+
+  /**
+   * Re-drives a dead-lettered delivery. Only the delivery ID is accepted: the
+   * target URL comes from the stored subscription and the payload/event ID are
+   * untouched. The state transition is a single conditional UPDATE so duplicate
+   * or concurrent requests cannot both succeed.
+   *
+   * @returns the new generation, or null when the delivery is not dead-lettered.
+   */
+  static async redriveDeadLetter(
+    deliveryId: number,
+    actor: string,
+  ): Promise<{ deliveryId: number; eventId: string; generation: number } | null> {
+    const result = await query(
+      `UPDATE webhook_deliveries
+       SET dead_lettered_at = NULL,
+           dead_letter_reason = NULL,
+           attempt_count = 0,
+           delivery_generation = delivery_generation + 1,
+           next_retry_at = $2,
+           last_redriven_at = $2,
+           last_redriven_by = $3,
+           updated_at = $2
+       WHERE id = $1
+         AND dead_lettered_at IS NOT NULL
+         AND delivered_at IS NULL
+       RETURNING id, event_id, delivery_generation`,
+      [deliveryId, new Date(), actor],
+    );
+
+    const row = result.rows[0] as
+      | { id: number; event_id: string; delivery_generation: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      deliveryId: Number(row.id),
+      eventId: String(row.event_id),
+      generation: Number(row.delivery_generation),
+    };
+  }
+
   static isSupported(type: string): type is WebhookEventType {
     return SUPPORTED_WEBHOOK_EVENT_TYPES.includes(type as WebhookEventType);
   }
 
-  async registerSubscription(input: RegisterWebhookInput): Promise<WebhookSubscription> {
-    const result = await query(
-      `INSERT INTO webhook_subscriptions (callback_url, event_types, secret, is_active)
-       VALUES ($1, $2::jsonb, $3, true)
-       RETURNING id, callback_url, event_types, secret, is_active, created_at, updated_at`,
-      [input.callbackUrl, JSON.stringify(input.eventTypes), input.secret ?? null],
-    );
-
-    return this.mapSubscriptionRow(result.rows[0] as Record<string, unknown>);
+  async registerSubscription(
+    ownerPublicKey: string,
+    input: RegisterWebhookInput,
+  ): Promise<WebhookSubscription> {
+    return withTransaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO webhook_subscriptions
+           (owner_public_key, callback_url, event_types, secret, is_active)
+         VALUES ($1, $2, $3::jsonb, $4, true)
+         RETURNING id, owner_public_key, callback_url, event_types, secret, is_active,
+                   created_at, updated_at`,
+        [ownerPublicKey, input.callbackUrl, JSON.stringify(input.eventTypes), input.secret ?? null],
+      );
+      const row = result.rows[0] as Record<string, unknown>;
+      await client.query(
+        `INSERT INTO webhook_subscription_audit
+           (subscription_id, owner_public_key, change_type, callback_url, event_types)
+         VALUES ($1, $2, 'created', $3, $4::jsonb)`,
+        [row.id, ownerPublicKey, input.callbackUrl, JSON.stringify(input.eventTypes)],
+      );
+      return this.mapSubscriptionRow(row);
+    });
   }
 
-  async listSubscriptions(): Promise<WebhookSubscription[]> {
+  async listSubscriptions(ownerPublicKey: string): Promise<WebhookSubscription[]> {
     const result = await query(
-      `SELECT id, callback_url, event_types, secret, is_active, created_at, updated_at
+      `SELECT id, owner_public_key, callback_url, event_types, secret, is_active,
+              created_at, updated_at
        FROM webhook_subscriptions
+       WHERE owner_public_key = $1
        ORDER BY created_at DESC`,
-      [],
+      [ownerPublicKey],
     );
 
     return result.rows.map((row) => this.mapSubscriptionRow(row as Record<string, unknown>));
   }
 
-  async deleteSubscription(id: number): Promise<boolean> {
-    const result = await query(
-      `DELETE FROM webhook_subscriptions
-       WHERE id = $1`,
-      [id],
-    );
+  async updateSubscription(
+    id: number,
+    ownerPublicKey: string,
+    changes: Partial<Pick<RegisterWebhookInput, 'callbackUrl' | 'eventTypes'>>,
+  ): Promise<WebhookSubscription | null> {
+    return withTransaction(async (client) => {
+      const selected = await client.query(
+        `SELECT id, owner_public_key, callback_url, event_types, secret, is_active,
+                created_at, updated_at
+         FROM webhook_subscriptions
+         WHERE id = $1 AND owner_public_key = $2
+         FOR UPDATE`,
+        [id, ownerPublicKey],
+      );
+      const current = selected.rows[0] as Record<string, unknown> | undefined;
+      if (!current) return null;
 
-    return (result.rowCount ?? 0) > 0;
+      const nextCallbackUrl = changes.callbackUrl ?? String(current.callback_url);
+      const currentEventTypes = current.event_types as WebhookEventType[];
+      const nextEventTypes = changes.eventTypes ?? currentEventTypes;
+      if (
+        nextCallbackUrl === current.callback_url &&
+        JSON.stringify(nextEventTypes) === JSON.stringify(currentEventTypes)
+      ) {
+        return this.mapSubscriptionRow(current);
+      }
+
+      const result = await client.query(
+        `UPDATE webhook_subscriptions
+         SET callback_url = $1, event_types = $2::jsonb, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3 AND owner_public_key = $4
+         RETURNING id, owner_public_key, callback_url, event_types, secret, is_active,
+                   created_at, updated_at`,
+        [nextCallbackUrl, JSON.stringify(nextEventTypes), id, ownerPublicKey],
+      );
+      const updated = result.rows[0] as Record<string, unknown>;
+      await client.query(
+        `INSERT INTO webhook_subscription_audit
+           (subscription_id, owner_public_key, change_type, previous_callback_url,
+            callback_url, previous_event_types, event_types)
+         VALUES ($1, $2, 'updated', $3, $4, $5::jsonb, $6::jsonb)`,
+        [
+          id,
+          ownerPublicKey,
+          current.callback_url,
+          nextCallbackUrl,
+          JSON.stringify(currentEventTypes),
+          JSON.stringify(nextEventTypes),
+        ],
+      );
+      return this.mapSubscriptionRow(updated);
+    });
+  }
+
+  async deleteSubscription(id: number, ownerPublicKey: string): Promise<boolean> {
+    return withTransaction(async (client) => {
+      const selected = await client.query(
+        `SELECT callback_url, event_types
+         FROM webhook_subscriptions
+         WHERE id = $1 AND owner_public_key = $2
+         FOR UPDATE`,
+        [id, ownerPublicKey],
+      );
+      const current = selected.rows[0] as
+        | { callback_url: string; event_types: WebhookEventType[] }
+        | undefined;
+      if (!current) return false;
+
+      await client.query(
+        `INSERT INTO webhook_subscription_audit
+           (subscription_id, owner_public_key, change_type, previous_callback_url,
+            previous_event_types)
+         VALUES ($1, $2, 'deleted', $3, $4::jsonb)`,
+        [id, ownerPublicKey, current.callback_url, JSON.stringify(current.event_types)],
+      );
+      await client.query(
+        `DELETE FROM webhook_subscriptions
+         WHERE id = $1 AND owner_public_key = $2`,
+        [id, ownerPublicKey],
+      );
+      return true;
+    });
+  }
+
+  async getSubscriptionAuditHistory(
+    id: number,
+    ownerPublicKey: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const result = await query(
+      `SELECT id, subscription_id, change_type, previous_callback_url, callback_url,
+              previous_event_types, event_types, created_at
+       FROM webhook_subscription_audit
+       WHERE subscription_id = $1 AND owner_public_key = $2
+       ORDER BY created_at DESC, id DESC`,
+      [id, ownerPublicKey],
+    );
+    return result.rows as Array<Record<string, unknown>>;
   }
 
   async getSubscriptionDeliveries(
     subscriptionId: number,
+    ownerPublicKey: string,
     limit: number = 50,
   ): Promise<WebhookDelivery[]> {
     const result = await query(
-      `SELECT id, subscription_id, event_id, event_type, attempt_count, last_status_code,
-              last_error, delivered_at, created_at, updated_at
-       FROM webhook_deliveries
-       WHERE subscription_id = $1
-       ORDER BY created_at DESC
-       LIMIT $2`,
-      [subscriptionId, limit],
+      `SELECT wd.id, wd.subscription_id, wd.event_id, wd.event_type, wd.attempt_count,
+              wd.last_status_code, wd.last_error, wd.delivered_at, wd.created_at, wd.updated_at
+       FROM webhook_deliveries wd
+       JOIN webhook_subscriptions ws ON ws.id = wd.subscription_id
+       WHERE wd.subscription_id = $1 AND ws.owner_public_key = $2
+       ORDER BY wd.created_at DESC, wd.id DESC
+       LIMIT $3`,
+      [subscriptionId, ownerPublicKey, limit],
     );
 
     return result.rows.map((row) => this.mapDeliveryRow(row as Record<string, unknown>));
@@ -540,6 +752,7 @@ export class WebhookService {
         `SELECT id, callback_url, secret
          FROM webhook_subscriptions
          WHERE is_active = true
+           AND owner_public_key IS NOT NULL
            AND event_types @> $1::jsonb`,
         [JSON.stringify([event.eventType])],
       );
@@ -576,7 +789,10 @@ export class WebhookService {
       : undefined;
 
     try {
-      const response = await postWebhook(callbackUrl, body, signature);
+      const response = await postWebhook(callbackUrl, body, signature, {
+        eventId: String(payload.payload.eventId),
+        generation: 1,
+      });
 
       const successful = response.ok;
 
@@ -676,6 +892,7 @@ export class WebhookService {
 
     return {
       id: Number(row.id),
+      ownerPublicKey: String(row.owner_public_key),
       callbackUrl: String(row.callback_url),
       eventTypes: (row.event_types as WebhookEventType[]) ?? [],
       ...(secret ? { secret } : {}),

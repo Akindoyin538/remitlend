@@ -338,14 +338,14 @@ describe('GET /api/loans/:loanId', () => {
     );
   });
 
-  it('should return 403 when the loan belongs to another borrower', async () => {
+  it('should return 404 when the loan belongs to another borrower', async () => {
     mockedQuery.mockResolvedValueOnce({
       rows: [{ address: 'other-wallet' }],
     });
 
     const response = await request(app).get('/api/loans/123').set(bearer(TEST_BORROWER));
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 
   it('should return 404 when the loan does not exist', async () => {
@@ -524,7 +524,7 @@ describe('POST /api/loans/:loanId/repay', () => {
     expect(response.body.unsignedTxXdr).toBe('BBBB...repay-xdr');
   });
 
-  it('should return 403 when loan does not belong to user', async () => {
+  it('should return 404 when loan does not belong to user', async () => {
     mockedQuery.mockResolvedValueOnce({
       rows: [{ address: 'other-wallet' }],
     });
@@ -534,7 +534,7 @@ describe('POST /api/loans/:loanId/repay', () => {
       .set(bearer(TEST_BORROWER))
       .send({ amount: 500, borrowerPublicKey: TEST_BORROWER });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 
   it('should reject missing amount', async () => {
@@ -619,7 +619,7 @@ describe('POST /api/loans/:loanId/build-deposit-collateral', () => {
     expect(response.body.unsignedTxXdr).toBe('CCCC...deposit-collateral-xdr');
   });
 
-  it('should return 403 when loan does not belong to user', async () => {
+  it('should return 404 when loan does not belong to user', async () => {
     mockedQuery.mockResolvedValueOnce({
       rows: [{ address: 'other-wallet' }],
     });
@@ -629,7 +629,7 @@ describe('POST /api/loans/:loanId/build-deposit-collateral', () => {
       .set(bearer(TEST_BORROWER))
       .send({ amount: 500, borrowerPublicKey: TEST_BORROWER });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 });
 
@@ -665,7 +665,7 @@ describe('POST /api/loans/:loanId/build-release-collateral', () => {
     expect(response.body.unsignedTxXdr).toBe('DDDD...release-collateral-xdr');
   });
 
-  it('should return 403 when loan does not belong to user', async () => {
+  it('should return 404 when loan does not belong to user', async () => {
     mockedQuery.mockResolvedValueOnce({
       rows: [{ address: 'other-wallet' }],
     });
@@ -675,7 +675,7 @@ describe('POST /api/loans/:loanId/build-release-collateral', () => {
       .set(bearer(TEST_BORROWER))
       .send({ borrowerPublicKey: TEST_BORROWER });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 });
 
@@ -717,7 +717,7 @@ describe('POST /api/loans/:loanId/build-refinance', () => {
     expect(response.body.unsignedTxXdr).toBe('EEEE...refinance-xdr');
   });
 
-  it('should return 403 when loan does not belong to user', async () => {
+  it('should return 404 when loan does not belong to user', async () => {
     mockedQuery.mockResolvedValueOnce({
       rows: [{ address: 'other-wallet' }],
     });
@@ -731,7 +731,7 @@ describe('POST /api/loans/:loanId/build-refinance', () => {
         borrowerPublicKey: TEST_BORROWER,
       });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 
   it('should reject missing newTerm', async () => {
@@ -780,7 +780,7 @@ describe('POST /api/loans/:loanId/build-extend', () => {
     expect(response.body.unsignedTxXdr).toBe('FFFF...extend-xdr');
   });
 
-  it('should return 403 when loan does not belong to user', async () => {
+  it('should return 404 when loan does not belong to user', async () => {
     mockedQuery.mockResolvedValueOnce({
       rows: [{ address: 'other-wallet' }],
     });
@@ -790,7 +790,7 @@ describe('POST /api/loans/:loanId/build-extend', () => {
       .set(bearer(TEST_BORROWER))
       .send({ extraLedgers: 8640, borrowerPublicKey: TEST_BORROWER });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 
   it('should reject missing extraLedgers', async () => {

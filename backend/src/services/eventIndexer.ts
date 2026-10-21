@@ -14,6 +14,7 @@ import { notificationService, type NotificationType } from './notificationServic
 import { sorobanService } from './sorobanService.js';
 import { updateUserScoresBulk } from './scoresService.js';
 import { transferHistoryService } from './transferHistoryService.js';
+import { invalidateForChainEvents } from '../utils/cacheContracts.js';
 import { AppError } from '../errors/AppError.js';
 import { recordIndexerLedgers } from '../middleware/metrics.js';
 import { setPauseState } from '../middleware/pauseGuard.js';
@@ -867,6 +868,10 @@ export class EventIndexer {
       }
     });
     // withTransaction commits here; any error triggers automatic ROLLBACK
+
+    // Event-driven cache invalidation AFTER commit. Idempotent, so duplicate
+    // or out-of-order events are safe; failures are metered, never thrown.
+    await invalidateForChainEvents(insertedEvents);
 
     for (const event of insertedEvents) {
       webhookService.dispatch(event).catch((error) => {

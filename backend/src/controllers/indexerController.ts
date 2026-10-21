@@ -6,8 +6,14 @@ import { transferHistoryService } from '../services/transferHistoryService.js';
 import {
   SUPPORTED_WEBHOOK_EVENT_TYPES,
   webhookService,
+  WebhookService,
   type WebhookEventType,
+  WebhookService,
 } from '../services/webhookService.js';
+import {
+  validateWebhookUrl,
+  WebhookEgressPolicyError,
+} from '../services/webhookEgress.js';
 import {
   createCursorPaginatedResponse,
   decodeCursor,
@@ -19,35 +25,6 @@ import {
 import { parseCappedLimit } from '../utils/queryHelpers.js';
 import logger from '../utils/logger.js';
 
-/**
- * Returns true if the hostname resolves to a private, loopback, or link-local
- * address that should never receive outbound webhook deliveries (SSRF guard).
- */
-function isPrivateHost(hostname: string): boolean {
-  // Strip IPv6 brackets
-  const host = hostname.replace(/^\[|\]$/g, '');
-
-  // Loopback
-  if (host === 'localhost' || host === '::1') return true;
-  if (/^127\./.test(host)) return true;
-
-  // Link-local (169.254.x.x, fe80::)
-  if (/^169\.254\./.test(host)) return true;
-  if (/^fe80:/i.test(host)) return true;
-
-  // Private IPv4 ranges (RFC 1918)
-  if (/^10\./.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
-  if (/^192\.168\./.test(host)) return true;
-
-  // AWS / GCP metadata endpoints
-  if (host === '169.254.169.254' || host === 'metadata.google.internal') return true;
-
-  // Catch-all for unqualified single-label hostnames (e.g. "internal", "db")
-  if (!host.includes('.') && host !== '::1') return true;
-
-  return false;
-}
 import { getStellarRpcUrl } from '../config/stellar.js';
 
 const buildEventFilters = (req: Request, baseParams: unknown[], initialWhereClause: string) => {
@@ -625,9 +602,13 @@ export const getRecentEvents = async (req: Request, res: Response) => {
   }
 };
 
-export const listWebhookSubscriptions = async (_req: Request, res: Response) => {
+export const listWebhookSubscriptions = async (req: Request, res: Response) => {
   try {
-    const subscriptions = await webhookService.listSubscriptions();
+    const ownerPublicKey = req.user?.publicKey;
+    if (!ownerPublicKey) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    const subscriptions = await webhookService.listSubscriptions(ownerPublicKey);
 
     res.json({
       success: true,
@@ -646,40 +627,30 @@ export const listWebhookSubscriptions = async (_req: Request, res: Response) => 
 
 export const createWebhookSubscription = async (req: Request, res: Response) => {
   try {
+    const ownerPublicKey = req.user?.publicKey;
+    if (!ownerPublicKey) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
     const { callbackUrl, eventTypes, secret } = req.body as {
       callbackUrl?: string;
       eventTypes?: string[];
       secret?: string;
     };
 
-    if (!callbackUrl) {
+    if (typeof callbackUrl !== 'string' || callbackUrl.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'callbackUrl is required',
+        message: 'callbackUrl must be a non-empty string',
       });
     }
 
-    let parsedUrl: URL;
     try {
-      parsedUrl = new URL(callbackUrl);
-    } catch {
+      await validateWebhookUrl(callbackUrl);
+    } catch (error) {
+      if (!(error instanceof WebhookEgressPolicyError)) throw error;
       return res.status(400).json({
         success: false,
-        message: 'callbackUrl must be a valid URL',
-      });
-    }
-
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      return res.status(400).json({
-        success: false,
-        message: 'callbackUrl must use http or https',
-      });
-    }
-
-    if (isPrivateHost(parsedUrl.hostname)) {
-      return res.status(400).json({
-        success: false,
-        message: 'callbackUrl must not target a private, loopback, or link-local address',
+        message: error.message,
       });
     }
 
@@ -697,6 +668,7 @@ export const createWebhookSubscription = async (req: Request, res: Response) => 
     }
 
     const subscription = await webhookService.registerSubscription(
+      ownerPublicKey,
       secret
         ? {
             callbackUrl,
@@ -724,8 +696,85 @@ export const createWebhookSubscription = async (req: Request, res: Response) => 
   }
 };
 
+export const updateWebhookSubscription = async (req: Request, res: Response) => {
+  try {
+    const ownerPublicKey = req.user?.publicKey;
+    if (!ownerPublicKey) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+
+    const subscriptionId = Number(req.params.id ?? req.params.subscriptionId);
+    if (!Number.isInteger(subscriptionId) || subscriptionId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'subscriptionId must be a positive integer',
+      });
+    }
+
+    const { callbackUrl, eventTypes } = req.body as {
+      callbackUrl?: string;
+      eventTypes?: string[];
+    };
+    if (callbackUrl === undefined && eventTypes === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one of callbackUrl or eventTypes is required',
+      });
+    }
+
+    if (callbackUrl !== undefined) {
+      if (typeof callbackUrl !== 'string' || callbackUrl.length === 0) {
+        return res.status(400).json({ success: false, message: 'callbackUrl must be a string' });
+      }
+      try {
+        await validateWebhookUrl(callbackUrl);
+      } catch (error) {
+        if (!(error instanceof WebhookEgressPolicyError)) throw error;
+        return res.status(400).json({ success: false, message: error.message });
+      }
+    }
+
+    let normalizedEventTypes: WebhookEventType[] | undefined;
+    if (eventTypes !== undefined) {
+      if (!Array.isArray(eventTypes)) {
+        return res.status(400).json({ success: false, message: 'eventTypes must be an array' });
+      }
+      if (
+        eventTypes.length === 0 ||
+        eventTypes.some((eventType) => !WebhookService.isSupported(eventType))
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `eventTypes must include only supported event types: ${SUPPORTED_WEBHOOK_EVENT_TYPES.join(', ')}`,
+        });
+      }
+      normalizedEventTypes = eventTypes as WebhookEventType[];
+    }
+
+    const subscription = await webhookService.updateSubscription(subscriptionId, ownerPublicKey, {
+      ...(callbackUrl !== undefined ? { callbackUrl } : {}),
+      ...(normalizedEventTypes !== undefined ? { eventTypes: normalizedEventTypes } : {}),
+    });
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Webhook subscription not found' });
+    }
+
+    return res.json({ success: true, data: { subscription } });
+  } catch (error) {
+    logger.withContext().error('Failed to update webhook subscription', { error });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update webhook subscription',
+    });
+  }
+};
+
 export const deleteWebhookSubscription = async (req: Request, res: Response) => {
   try {
+    const ownerPublicKey = req.user?.publicKey;
+    if (!ownerPublicKey) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
     const subscriptionId = Number(req.params.id ?? req.params.subscriptionId);
 
     if (!Number.isInteger(subscriptionId) || subscriptionId <= 0) {
@@ -735,7 +784,7 @@ export const deleteWebhookSubscription = async (req: Request, res: Response) => 
       });
     }
 
-    const deleted = await webhookService.deleteSubscription(subscriptionId);
+    const deleted = await webhookService.deleteSubscription(subscriptionId, ownerPublicKey);
     if (!deleted) {
       return res.status(404).json({
         success: false,
@@ -756,8 +805,40 @@ export const deleteWebhookSubscription = async (req: Request, res: Response) => 
   }
 };
 
+export const getWebhookSubscriptionAudit = async (req: Request, res: Response) => {
+  try {
+    const ownerPublicKey = req.user?.publicKey;
+    if (!ownerPublicKey) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    const subscriptionId = Number(req.params.id ?? req.params.subscriptionId);
+    if (!Number.isInteger(subscriptionId) || subscriptionId <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'subscriptionId must be a positive integer',
+      });
+    }
+
+    const history = await webhookService.getSubscriptionAuditHistory(
+      subscriptionId,
+      ownerPublicKey,
+    );
+    return res.json({ success: true, data: { history } });
+  } catch (error) {
+    logger.withContext().error('Failed to get webhook subscription audit history', { error });
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get webhook subscription audit history',
+    });
+  }
+};
+
 export const getWebhookDeliveries = async (req: Request, res: Response) => {
   try {
+    const ownerPublicKey = req.user?.publicKey;
+    if (!ownerPublicKey) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
     const subscriptionId = Number(req.params.id ?? req.params.subscriptionId);
     const limit = parseCappedLimit(req, 50);
 
@@ -768,7 +849,11 @@ export const getWebhookDeliveries = async (req: Request, res: Response) => {
       });
     }
 
-    const deliveries = await webhookService.getSubscriptionDeliveries(subscriptionId, limit);
+    const deliveries = await webhookService.getSubscriptionDeliveries(
+      subscriptionId,
+      ownerPublicKey,
+      limit,
+    );
 
     return res.json({
       success: true,
@@ -784,6 +869,34 @@ export const getWebhookDeliveries = async (req: Request, res: Response) => {
       message: 'Failed to fetch webhook deliveries',
     });
   }
+};
+
+export const listWebhookDeadLetters = async (req: Request, res: Response) => {
+  const limit = parseCappedLimit(req, 50);
+  const deliveries = await WebhookService.listDeadLetters(limit);
+  return res.json({ success: true, data: { deliveries } });
+};
+
+export const redriveWebhookDelivery = async (req: Request, res: Response) => {
+  const deliveryId = Number(req.params.deliveryId);
+  if (!Number.isInteger(deliveryId) || deliveryId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'deliveryId must be a positive integer',
+    });
+  }
+
+  const actor = req.user?.publicKey ?? 'unknown';
+  const result = await WebhookService.redriveDeadLetter(deliveryId, actor);
+  if (!result) {
+    return res.status(409).json({
+      success: false,
+      message: 'Delivery is not in the dead-letter state',
+    });
+  }
+
+  logger.withContext().info('Webhook delivery re-driven', { ...result, actor });
+  return res.status(202).json({ success: true, data: result });
 };
 
 export const reindexLedgerRange = async (req: Request, res: Response) => {
