@@ -1,6 +1,7 @@
 import logger from '../utils/logger.js';
 import { getOutboundTraceparent } from '../utils/requestContext.js';
 import { signWebhookPayload, getActiveSecret } from './webhookSigningService.js';
+import { sendWebhookRequest } from './webhookEgress.js';
 
 export interface WebhookDelivery {
   endpoint: string;
@@ -25,9 +26,10 @@ export async function sendWebhook(delivery: WebhookDelivery): Promise<void> {
     const { signature, timestamp } = signWebhookPayload(payload, secret);
     const payloadStr = JSON.stringify(payload);
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
+    const response = await sendWebhookRequest(
+      endpoint,
+      payloadStr,
+      {
         'Content-Type': 'application/json',
         'x-remitlend-signature': signature,
         'x-remitlend-timestamp': timestamp,
@@ -36,9 +38,8 @@ export async function sendWebhook(delivery: WebhookDelivery): Promise<void> {
         // distinguishable from the work that triggered it.
         traceparent: getOutboundTraceparent(),
       },
-      body: payloadStr,
-      timeout: 10000, // 10 second timeout
-    });
+      10_000,
+    );
 
     if (!response.ok) {
       logger.warn('Webhook delivery failed', {

@@ -20,7 +20,7 @@ subscribe, receive, and verify webhook deliveries.
 
 ## Creating a Subscription
 
-**Endpoint:** `POST /api/webhooks/subscriptions`
+**Endpoint:** `POST /api/indexer/webhooks`
 
 **Headers:**
 ```
@@ -32,17 +32,17 @@ Authorization: Bearer <your-jwt-token>
 
 ```json
 {
-  "url": "https://your-service.com/webhooks/remitlend",
-  "events": ["LoanApproved", "LoanRepaid", "LoanDefaulted"],
-  "description": "My loan tracking service (optional)"
+  "callbackUrl": "https://your-service.com/webhooks/remitlend",
+  "eventTypes": ["LoanApproved", "LoanRepaid", "LoanDefaulted"],
+  "secret": "your-signing-secret"
 }
 ```
 
-| Field       | Type     | Description                                          |
-|-------------|----------|------------------------------------------------------|
-| `url`       | string   | HTTPS endpoint that will receive POST requests       |
-| `events`    | string[] | Array of [event types](#supported-event-types)       |
-| `description` | string | Optional human-readable label                      |
+| Field         | Type     | Description                                                    |
+|---------------|----------|----------------------------------------------------------------|
+| `callbackUrl` | string   | Public HTTPS endpoint on port 443 that receives POST requests |
+| `eventTypes`  | string[] | Array of [event types](#supported-event-types)                 |
+| `secret`      | string   | Optional signing secret                                        |
 
 **Response (201):**
 
@@ -50,11 +50,12 @@ Authorization: Bearer <your-jwt-token>
 {
   "success": true,
   "data": {
-    "id": "sub_abc123",
-    "url": "https://your-service.com/webhooks/remitlend",
-    "events": ["LoanApproved", "LoanRepaid", "LoanDefaulted"],
-    "active": true,
-    "createdAt": "2026-05-28T12:00:00.000Z"
+    "subscription": {
+      "id": 123,
+      "callbackUrl": "https://your-service.com/webhooks/remitlend",
+      "eventTypes": ["LoanApproved", "LoanRepaid", "LoanDefaulted"],
+      "isActive": true
+    }
   }
 }
 ```
@@ -64,12 +65,18 @@ is required.
 
 ### Managing Subscriptions
 
-| Method | Endpoint                              | Description            |
-|--------|---------------------------------------|------------------------|
-| GET    | `/api/webhooks/subscriptions`         | List all subscriptions |
-| GET    | `/api/webhooks/subscriptions/:id`     | Get a single subscription |
-| PUT    | `/api/webhooks/subscriptions/:id`     | Update events / URL    |
-| DELETE | `/api/webhooks/subscriptions/:id`     | Delete a subscription  |
+| Method | Endpoint                          | Description |
+|--------|-----------------------------------|-------------|
+| GET    | `/api/indexer/webhooks`           | List subscriptions owned by the authenticated wallet |
+| PUT    | `/api/indexer/webhooks/:id`       | Update an owned subscription's URL or event filters |
+| GET    | `/api/indexer/webhooks/:id/audit` | Read an owned subscription's append-only change history |
+| DELETE | `/api/indexer/webhooks/:id`       | Delete an owned subscription |
+
+Subscriptions are isolated by the wallet in the bearer token; knowing another
+subscription's ID does not grant access. Endpoints must use HTTPS on port 443
+and resolve exclusively to public IP addresses. Each delivery re-resolves and
+validates DNS, connects to the validated address directly, and does not follow
+redirects. Legacy subscriptions without an owner are not sent events.
 
 ---
 

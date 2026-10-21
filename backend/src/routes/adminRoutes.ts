@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireApiKey } from '../middleware/auth.js';
-import { requireJwtAuth, requireRoles } from '../middleware/jwtAuth.js';
+import { requireJwtAuth, requireRoles, requireScopes } from '../middleware/jwtAuth.js';
 import { strictRateLimiter } from '../middleware/rateLimiter.js';
 import { validateBody } from '../middleware/validation.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -17,6 +17,7 @@ import {
   listWebhookSubscriptions,
   reprocessQuarantinedEvents,
   reindexLedgerRange,
+  updateWebhookSubscription,
 } from '../controllers/indexerController.js';
 import {
   listLoanDisputes,
@@ -369,7 +370,7 @@ router.post(
  *     summary: Register a webhook subscription
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -396,7 +397,8 @@ router.post(
  */
 router.post(
   '/webhooks',
-  requireApiKey('admin:webhooks'),
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
   strictRateLimiter,
   auditLog,
   createWebhookSubscription,
@@ -409,7 +411,7 @@ router.post(
  *     summary: List webhook subscriptions
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     responses:
  *       200:
  *         description: List of subscriptions
@@ -418,7 +420,7 @@ router.post(
  *             schema:
  *               $ref: '#/components/schemas/WebhookSubscriptionListResponse'
  */
-router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscriptions);
+router.get('/webhooks', requireJwtAuth, requireScopes('read:webhooks'), listWebhookSubscriptions);
 
 /**
  * @swagger
@@ -427,7 +429,7 @@ router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscription
  *     summary: Remove a webhook subscription
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -444,10 +446,26 @@ router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscription
  */
 router.delete(
   '/webhooks/:id',
-  requireApiKey('admin:webhooks'),
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
   strictRateLimiter,
   auditLog,
   deleteWebhookSubscription,
+);
+
+router.put(
+  '/webhooks/:id',
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
+  strictRateLimiter,
+  auditLog,
+  updateWebhookSubscription,
+);
+router.get(
+  '/webhooks/:id/audit',
+  requireJwtAuth,
+  requireScopes('read:webhooks'),
+  getWebhookSubscriptionAudit,
 );
 
 /**
@@ -457,7 +475,7 @@ router.delete(
  *     summary: View webhook delivery history
  *     tags: [Admin]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -478,7 +496,12 @@ router.delete(
  *             schema:
  *               $ref: '#/components/schemas/WebhookDeliveriesResponse'
  */
-router.get('/webhooks/:id/deliveries', requireApiKey('admin:webhooks'), getWebhookDeliveries);
+router.get(
+  '/webhooks/:id/deliveries',
+  requireJwtAuth,
+  requireScopes('read:webhooks'),
+  getWebhookDeliveries,
+);
 
 /**
  * @swagger

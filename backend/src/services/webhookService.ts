@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
-import { query } from '../db/connection.js';
+import { query, withTransaction } from '../db/connection.js';
 import logger from '../utils/logger.js';
 import { getOutboundTraceparent } from '../utils/requestContext.js';
+import { sendWebhookRequest } from './webhookEgress.js';
 
 // #1520 — this array is the single source of truth for which event types
 // external webhook subscribers can register for. docs/webhooks.md's
@@ -97,6 +98,7 @@ export interface IndexedLoanEvent {
 
 export interface WebhookSubscription {
   id: number;
+  ownerPublicKey: string;
   callbackUrl: string;
   eventTypes: WebhookEventType[];
   secret?: string;
@@ -320,7 +322,7 @@ export class WebhookService {
                 payload, attempt_count, delivery_generation
          FROM webhook_deliveries wd
          JOIN webhook_subscriptions ws ON wd.subscription_id = ws.id
-         WHERE wd.delivered_at IS NULL 
+         WHERE wd.delivered_at IS NULL
            AND wd.next_retry_at IS NOT NULL
            AND wd.next_retry_at <= $1
            AND wd.attempt_count < $2
@@ -581,50 +583,156 @@ export class WebhookService {
     return SUPPORTED_WEBHOOK_EVENT_TYPES.includes(type as WebhookEventType);
   }
 
-  async registerSubscription(input: RegisterWebhookInput): Promise<WebhookSubscription> {
-    const result = await query(
-      `INSERT INTO webhook_subscriptions (callback_url, event_types, secret, is_active)
-       VALUES ($1, $2::jsonb, $3, true)
-       RETURNING id, callback_url, event_types, secret, is_active, created_at, updated_at`,
-      [input.callbackUrl, JSON.stringify(input.eventTypes), input.secret ?? null],
-    );
-
-    return this.mapSubscriptionRow(result.rows[0] as Record<string, unknown>);
+  async registerSubscription(
+    ownerPublicKey: string,
+    input: RegisterWebhookInput,
+  ): Promise<WebhookSubscription> {
+    return withTransaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO webhook_subscriptions
+           (owner_public_key, callback_url, event_types, secret, is_active)
+         VALUES ($1, $2, $3::jsonb, $4, true)
+         RETURNING id, owner_public_key, callback_url, event_types, secret, is_active,
+                   created_at, updated_at`,
+        [ownerPublicKey, input.callbackUrl, JSON.stringify(input.eventTypes), input.secret ?? null],
+      );
+      const row = result.rows[0] as Record<string, unknown>;
+      await client.query(
+        `INSERT INTO webhook_subscription_audit
+           (subscription_id, owner_public_key, change_type, callback_url, event_types)
+         VALUES ($1, $2, 'created', $3, $4::jsonb)`,
+        [row.id, ownerPublicKey, input.callbackUrl, JSON.stringify(input.eventTypes)],
+      );
+      return this.mapSubscriptionRow(row);
+    });
   }
 
-  async listSubscriptions(): Promise<WebhookSubscription[]> {
+  async listSubscriptions(ownerPublicKey: string): Promise<WebhookSubscription[]> {
     const result = await query(
-      `SELECT id, callback_url, event_types, secret, is_active, created_at, updated_at
+      `SELECT id, owner_public_key, callback_url, event_types, secret, is_active,
+              created_at, updated_at
        FROM webhook_subscriptions
+       WHERE owner_public_key = $1
        ORDER BY created_at DESC`,
-      [],
+      [ownerPublicKey],
     );
 
     return result.rows.map((row) => this.mapSubscriptionRow(row as Record<string, unknown>));
   }
 
-  async deleteSubscription(id: number): Promise<boolean> {
-    const result = await query(
-      `DELETE FROM webhook_subscriptions
-       WHERE id = $1`,
-      [id],
-    );
+  async updateSubscription(
+    id: number,
+    ownerPublicKey: string,
+    changes: Partial<Pick<RegisterWebhookInput, 'callbackUrl' | 'eventTypes'>>,
+  ): Promise<WebhookSubscription | null> {
+    return withTransaction(async (client) => {
+      const selected = await client.query(
+        `SELECT id, owner_public_key, callback_url, event_types, secret, is_active,
+                created_at, updated_at
+         FROM webhook_subscriptions
+         WHERE id = $1 AND owner_public_key = $2
+         FOR UPDATE`,
+        [id, ownerPublicKey],
+      );
+      const current = selected.rows[0] as Record<string, unknown> | undefined;
+      if (!current) return null;
 
-    return (result.rowCount ?? 0) > 0;
+      const nextCallbackUrl = changes.callbackUrl ?? String(current.callback_url);
+      const currentEventTypes = current.event_types as WebhookEventType[];
+      const nextEventTypes = changes.eventTypes ?? currentEventTypes;
+      if (
+        nextCallbackUrl === current.callback_url &&
+        JSON.stringify(nextEventTypes) === JSON.stringify(currentEventTypes)
+      ) {
+        return this.mapSubscriptionRow(current);
+      }
+
+      const result = await client.query(
+        `UPDATE webhook_subscriptions
+         SET callback_url = $1, event_types = $2::jsonb, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3 AND owner_public_key = $4
+         RETURNING id, owner_public_key, callback_url, event_types, secret, is_active,
+                   created_at, updated_at`,
+        [nextCallbackUrl, JSON.stringify(nextEventTypes), id, ownerPublicKey],
+      );
+      const updated = result.rows[0] as Record<string, unknown>;
+      await client.query(
+        `INSERT INTO webhook_subscription_audit
+           (subscription_id, owner_public_key, change_type, previous_callback_url,
+            callback_url, previous_event_types, event_types)
+         VALUES ($1, $2, 'updated', $3, $4, $5::jsonb, $6::jsonb)`,
+        [
+          id,
+          ownerPublicKey,
+          current.callback_url,
+          nextCallbackUrl,
+          JSON.stringify(currentEventTypes),
+          JSON.stringify(nextEventTypes),
+        ],
+      );
+      return this.mapSubscriptionRow(updated);
+    });
+  }
+
+  async deleteSubscription(id: number, ownerPublicKey: string): Promise<boolean> {
+    return withTransaction(async (client) => {
+      const selected = await client.query(
+        `SELECT callback_url, event_types
+         FROM webhook_subscriptions
+         WHERE id = $1 AND owner_public_key = $2
+         FOR UPDATE`,
+        [id, ownerPublicKey],
+      );
+      const current = selected.rows[0] as
+        | { callback_url: string; event_types: WebhookEventType[] }
+        | undefined;
+      if (!current) return false;
+
+      await client.query(
+        `INSERT INTO webhook_subscription_audit
+           (subscription_id, owner_public_key, change_type, previous_callback_url,
+            previous_event_types)
+         VALUES ($1, $2, 'deleted', $3, $4::jsonb)`,
+        [id, ownerPublicKey, current.callback_url, JSON.stringify(current.event_types)],
+      );
+      await client.query(
+        `DELETE FROM webhook_subscriptions
+         WHERE id = $1 AND owner_public_key = $2`,
+        [id, ownerPublicKey],
+      );
+      return true;
+    });
+  }
+
+  async getSubscriptionAuditHistory(
+    id: number,
+    ownerPublicKey: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const result = await query(
+      `SELECT id, subscription_id, change_type, previous_callback_url, callback_url,
+              previous_event_types, event_types, created_at
+       FROM webhook_subscription_audit
+       WHERE subscription_id = $1 AND owner_public_key = $2
+       ORDER BY created_at DESC, id DESC`,
+      [id, ownerPublicKey],
+    );
+    return result.rows as Array<Record<string, unknown>>;
   }
 
   async getSubscriptionDeliveries(
     subscriptionId: number,
+    ownerPublicKey: string,
     limit: number = 50,
   ): Promise<WebhookDelivery[]> {
     const result = await query(
-      `SELECT id, subscription_id, event_id, event_type, attempt_count, last_status_code,
-              last_error, delivered_at, created_at, updated_at
-       FROM webhook_deliveries
-       WHERE subscription_id = $1
-       ORDER BY created_at DESC
-       LIMIT $2`,
-      [subscriptionId, limit],
+      `SELECT wd.id, wd.subscription_id, wd.event_id, wd.event_type, wd.attempt_count,
+              wd.last_status_code, wd.last_error, wd.delivered_at, wd.created_at, wd.updated_at
+       FROM webhook_deliveries wd
+       JOIN webhook_subscriptions ws ON ws.id = wd.subscription_id
+       WHERE wd.subscription_id = $1 AND ws.owner_public_key = $2
+       ORDER BY wd.created_at DESC, wd.id DESC
+       LIMIT $3`,
+      [subscriptionId, ownerPublicKey, limit],
     );
 
     return result.rows.map((row) => this.mapDeliveryRow(row as Record<string, unknown>));
@@ -644,6 +752,7 @@ export class WebhookService {
         `SELECT id, callback_url, secret
          FROM webhook_subscriptions
          WHERE is_active = true
+           AND owner_public_key IS NOT NULL
            AND event_types @> $1::jsonb`,
         [JSON.stringify([event.eventType])],
       );
@@ -783,6 +892,7 @@ export class WebhookService {
 
     return {
       id: Number(row.id),
+      ownerPublicKey: String(row.owner_public_key),
       callbackUrl: String(row.callback_url),
       eventTypes: (row.event_types as WebhookEventType[]) ?? [],
       ...(secret ? { secret } : {}),
