@@ -11,6 +11,8 @@ import {
   createWebhookSubscription,
   deleteWebhookSubscription,
   getWebhookDeliveries,
+  listWebhookDeadLetters,
+  redriveWebhookDelivery,
   listQuarantinedEvents,
   listWebhookSubscriptions,
   reprocessQuarantinedEvents,
@@ -495,6 +497,45 @@ router.get(
 
     res.json(result.rows[0]);
   }),
+);
+
+/**
+ * @swagger
+ * /admin/webhooks/dead-letters:
+ *   get:
+ *     summary: List dead-lettered webhook deliveries (redacted)
+ *     tags: [Admin]
+ *     responses:
+ *       200:
+ *         description: Dead-lettered deliveries
+ */
+router.get(
+  '/webhooks/dead-letters',
+  requireJwtAuth,
+  requireRoles('admin'),
+  asyncHandler(listWebhookDeadLetters),
+);
+
+/**
+ * @swagger
+ * /admin/webhooks/deliveries/{deliveryId}/redrive:
+ *   post:
+ *     summary: Re-drive a dead-lettered webhook delivery
+ *     description: Takes no body. Target URL and payload cannot be changed.
+ *     tags: [Admin]
+ *     responses:
+ *       202:
+ *         description: Delivery re-queued with an incremented generation
+ *       409:
+ *         description: Delivery is not dead-lettered
+ */
+router.post(
+  '/webhooks/deliveries/:deliveryId/redrive',
+  requireJwtAuth,
+  requireRoles('admin'),
+  strictRateLimiter,
+  auditLog,
+  asyncHandler(redriveWebhookDelivery),
 );
 
 export default router;
