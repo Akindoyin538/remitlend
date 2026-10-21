@@ -29,6 +29,7 @@ import { globalRateLimiter } from './middleware/rateLimiter.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { metricsHandler, metricsMiddleware } from './middleware/metrics.js';
 import { requestLogger } from './middleware/requestLogger.js';
+import { requestDeadlineMiddleware } from './middleware/requestDeadline.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { traceContextMiddleware } from './middleware/traceContext.js';
 import { cspHeadersMiddleware, cspNonceMiddleware } from './middleware/cspNonce.js';
@@ -165,6 +166,7 @@ app.use(compression());
 app.use(express.json({ limit: '100kb', type: ['application/json', 'application/csp-report'] }));
 app.use(globalRateLimiter);
 app.use(requestIdMiddleware);
+app.use(requestDeadlineMiddleware);
 // Trace context (#414): resolves/creates the W3C `traceparent` for the request
 // after the request id so both correlation fields live in one async context.
 app.use(traceContextMiddleware);

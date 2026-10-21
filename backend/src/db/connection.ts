@@ -1,6 +1,7 @@
 import pg, { type PoolClient } from 'pg';
 import { recordDbQueryDuration } from '../middleware/metrics.js';
 import logger from '../utils/logger.js';
+import { abortable, throwIfAborted } from '../utils/requestDeadline.js';
 
 export type { PoolClient };
 
@@ -166,7 +167,8 @@ export const query = async (text: string, params?: unknown[]) => {
   const callSite = new Error('Slow query call site').stack;
   return withRetry(async () => {
     const start = Date.now();
-    const result = await pool.query(text, params);
+    throwIfAborted();
+    const result = await abortable(pool.query(text, params));
     const duration = Date.now() - start;
     const { operation, table } = describeQuery(text);
     recordDbQueryDuration(duration / 1000, operation, table);
