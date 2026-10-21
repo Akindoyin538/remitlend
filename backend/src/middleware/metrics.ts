@@ -67,6 +67,13 @@ export const scoreReconciliationLastRunTimestampGauge = new client.Gauge({
   registers: [metricsRegistry],
 });
 
+export const deprecatedApiUsageCounter = new client.Counter({
+  name: 'deprecated_api_requests_total',
+  help: 'Requests served by deprecated API surfaces, by matched route template and sanitized client version cohort.',
+  labelNames: ['route', 'client_version'] as const,
+  registers: [metricsRegistry],
+});
+
 export const httpRequestDurationHistogram = new client.Histogram({
   name: 'http_request_duration_seconds',
   help: 'HTTP request duration in seconds.',
@@ -265,7 +272,7 @@ export function recordBackoffTriggered(contractId: string): void {
   indexerBackoffTriggeredCounter.inc({ contract_id: contractId });
 }
 
-function routeLabel(req: Request): string {
+export function routeLabel(req: Request): string {
   const routePath = req.route?.path;
   if (typeof routePath === 'string') {
     return `${req.baseUrl}${routePath}` || req.path;
