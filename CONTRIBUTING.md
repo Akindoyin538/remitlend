@@ -154,6 +154,26 @@ When you add or bump a contract version, add its manifest alongside the
 contract and reference it in the PR description under compatibility impact and
 rollout steps.
 
+## Consumer contract tests
+
+Critical financial flows (loan application, repayment, pool reads, transaction
+status) are protected by consumer-driven contracts in
+`backend/src/__tests__/consumerContracts.test.ts`. They run the real Express
+routes with the chain (`sorobanService`) and database mocked.
+
+To add a contract:
+
+1. Add an entry to `CONTRACTS` with the `route`, the `consumer` that depends on
+   it, a `version`, and a strict zod `schema` of the response (required fields,
+   enums, and money units as numbers).
+2. Build request fixtures by parsing them with the route's schema from
+   `backend/src/schemas` so they cannot drift from validation.
+3. Call `expectContract(CONTRACTS.<name>, res.body)` for the success path and
+   `CONTRACTS.errorEnvelope` for 401/403/400 paths. Failures print the route,
+   consumer and mismatched field.
+4. A breaking response change must bump the contract `version` and update the
+   schema in the same PR; otherwise CI fails.
+
 ## Testing Requirements
 
 ## Exemptions
