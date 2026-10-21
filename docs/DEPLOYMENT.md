@@ -185,6 +185,42 @@ PostgreSQL and Redis are intentionally not exposed through host ports. They comm
 
 Production images should use an explicit release tag or immutable image reference rather than a mutable `latest` or staging tag.
 
+## Expand-Contract Migrations
+
+Schema changes that old and new application versions cannot both tolerate must
+be split into two independently deployed migrations. The reference example is
+`notifications.read` (boolean) to `notifications.read_at` (timestamptz).
+
+| Phase | Location | Command | Reversible |
+| --- | --- | --- | --- |
+| Expand | `backend/migrations/1806000000000_notifications-read-at-expand.js` | `npm run migrate:up` | Yes (`migrate:down` drops new column/trigger) |
+| Contract | `backend/migrations-contract/1806100000000_notifications-drop-read.js` | `npm run migrate:contract:up` | Schema only; dropped data is derived back from `read_at` |
+
+Contract migrations are tracked in a separate `pgmigrations_contract` table and
+are never run by `npm run migrate:up`.
+
+### Required sequencing
+
+1. Back up the database.
+2. Run the expand migration (additive; a trigger keeps `read` and `read_at` in
+   sync for writes from old and new code, so the currently deployed app keeps working).
+3. Deploy the new application version (reads/writes `read_at` only).
+4. Roll out fully; wait out the rollback window.
+5. Run the contract migration in a later release.
+
+### Release gates for the contract step
+
+- No running app instance (including workers and rollback targets) references the old column.
+- Expand migration applied everywhere and backfill complete (the contract migration also asserts this and aborts otherwise).
+- A verified backup taken after the last old-version instance was retired.
+- Contract migration is a separate release/approval from the expand release.
+
+### Rollback guidance
+
+- Before contract: roll back the app freely; the old column is still maintained. `npm run migrate:down` removes the expand artifacts.
+- Contract step is the irreversible point: `migrate:contract:down` re-creates `read` from `read_at`, but any data not representable in `read_at` and any old-version deployments are not restored. Prefer restoring from backup for full recovery.
+- Tested paths (`backend/src/__tests__/expandContractMigration.test.ts`, run in CI with the backend suite and a Postgres service): migration on a populated prior schema, on a fresh install, old/new writer sync, a concurrent-write test (no lost or duplicated rows), and the gated contract drop.
+
 ## Verifying the Deployment
 
 Check the status of all services:
