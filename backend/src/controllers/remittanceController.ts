@@ -206,7 +206,8 @@ export const getRemittance = asyncHandler(async (req: Request, res: Response) =>
 
   // Verify the user owns this remittance
   if (remittance.senderId !== senderAddress) {
-    throw AppError.forbidden('You do not have access to this remittance');
+    // Indistinguishable from a missing record so existence is not revealed (#519).
+    throw AppError.notFound('Remittance not found');
   }
 
   res.json({
@@ -243,7 +244,8 @@ export const submitRemittanceTransaction = asyncHandler(async (req: Request, res
     const remittance = await remittanceService.getRemittance(id);
 
     if (remittance.senderId !== senderAddress) {
-      throw AppError.forbidden('You do not have access to this remittance');
+      // Indistinguishable from a missing record so existence is not revealed (#519).
+    throw AppError.notFound('Remittance not found');
     }
 
     if (remittance.status !== 'pending') {

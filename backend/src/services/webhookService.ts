@@ -246,6 +246,7 @@ async function postWebhook(
   callbackUrl: string,
   body: string,
   signature: string | undefined,
+  identity?: { eventId?: string; generation?: number },
 ): Promise<Response> {
   const timeoutMs = getWebhookRequestTimeoutMs();
   const controller = new AbortController();
@@ -259,6 +260,13 @@ async function postWebhook(
         'content-type': 'application/json',
         // Continue the retry's trace context into the subscriber's logs (#414).
         traceparent: getOutboundTraceparent(),
+        // Stable identity for consumer-side deduplication (#517). The event ID
+        // never changes across retries or operator re-drives; the generation
+        // increments on each re-drive.
+        ...(identity?.eventId && { 'x-remitlend-event-id': identity.eventId }),
+        ...(identity?.generation !== undefined && {
+          'x-remitlend-delivery-generation': String(identity.generation),
+        }),
         // X-RemitLend-Signature uses the GitHub/Stripe-style "sha256=<hex>"
         // format so subscribers can verify payload integrity (see
         // docs/wiki/webhook-signatures.md for the verification recipe).
@@ -289,6 +297,17 @@ export const getRetryDelayMs = (attemptNumber: number): number => {
   return RETRY_DELAYS_MS[delayIndex] ?? RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]!;
 };
 
+/**
+ * Produces a short failure summary that is safe to store and expose to
+ * operators: URLs, long tokens and anything past 200 chars are removed.
+ */
+export function redactFailureSummary(message: string): string {
+  return message
+    .replace(/https?:\/\/\S+/gi, '[url]')
+    .replace(/[A-Za-z0-9+/=_-]{32,}/g, '[redacted]')
+    .slice(0, 200);
+}
+
 export class WebhookService {
   // Retry processor that polls for pending retries
   static async processRetries(): Promise<void> {
@@ -298,13 +317,14 @@ export class WebhookService {
       const now = new Date();
       const result = await query(
         `SELECT id, subscription_id, callback_url, secret, event_id, event_type, 
-                payload, attempt_count
+                payload, attempt_count, delivery_generation
          FROM webhook_deliveries wd
          JOIN webhook_subscriptions ws ON wd.subscription_id = ws.id
          WHERE wd.delivered_at IS NULL 
            AND wd.next_retry_at IS NOT NULL
            AND wd.next_retry_at <= $1
            AND wd.attempt_count < $2
+           AND wd.dead_lettered_at IS NULL
          ORDER BY wd.next_retry_at ASC
          LIMIT 100`,
         [now, MAX_RETRY_ATTEMPTS],
@@ -327,6 +347,7 @@ export class WebhookService {
           event_type: string;
           payload: Record<string, unknown>;
           attempt_count: number;
+          delivery_generation?: number;
         };
         // Defensive circuit breaker: the SQL filter above already excludes
         // deliveries at the retry ceiling, but guard here too so a delivery
@@ -343,6 +364,7 @@ export class WebhookService {
           delivery.event_type as WebhookEventType,
           delivery.payload,
           delivery.attempt_count,
+          Number(delivery.delivery_generation ?? 1),
         );
       }
     } catch (error) {
@@ -359,6 +381,7 @@ export class WebhookService {
     _eventType: WebhookEventType,
     payload: Record<string, unknown>,
     attemptCount: number,
+    generation: number = 1,
   ): Promise<void> {
     const preparedPayload = prepareWebhookPayload(payload);
     const body = preparedPayload.body;
@@ -370,7 +393,7 @@ export class WebhookService {
     let response: Response | null = null;
 
     try {
-      response = await postWebhook(callbackUrl, body, signature);
+      response = await postWebhook(callbackUrl, body, signature, { eventId, generation });
 
       const successful = response.ok;
       const newAttemptCount = attemptCount + 1;
@@ -409,9 +432,20 @@ export class WebhookService {
                last_status_code = $2, 
                last_error = $3,
                next_retry_at = $4,
-               updated_at = $5
+               updated_at = $5,
+               dead_lettered_at = $7,
+               dead_letter_reason = $8
            WHERE id = $6`,
-          [newAttemptCount, response.status, errorMsg, nextRetryTime, new Date(), deliveryId],
+          [
+            newAttemptCount,
+            response.status,
+            errorMsg,
+            nextRetryTime,
+            new Date(),
+            deliveryId,
+            nextRetryTime ? null : new Date(),
+            nextRetryTime ? null : redactFailureSummary(errorMsg),
+          ],
         );
 
         if (nextRetryTime) {
@@ -448,9 +482,19 @@ export class WebhookService {
          SET attempt_count = $1, 
              last_error = $2,
              next_retry_at = $3,
-             updated_at = $4
+             updated_at = $4,
+             dead_lettered_at = $6,
+             dead_letter_reason = $7
          WHERE id = $5`,
-        [newAttemptCount, errorMsg, nextRetryTime, new Date(), deliveryId],
+        [
+          newAttemptCount,
+          errorMsg,
+          nextRetryTime,
+          new Date(),
+          deliveryId,
+          nextRetryTime ? null : new Date(),
+          nextRetryTime ? null : redactFailureSummary(errorMsg),
+        ],
       );
 
       if (nextRetryTime) {
@@ -473,6 +517,66 @@ export class WebhookService {
       }
     }
   }
+
+  /**
+   * Lists dead-lettered deliveries (retry exhausted, never delivered).
+   * The payload is intentionally not returned; only identity and a redacted
+   * failure summary are exposed.
+   */
+  static async listDeadLetters(limit: number = 50): Promise<Array<Record<string, unknown>>> {
+    const result = await query(
+      `SELECT id, subscription_id, event_id, event_type, attempt_count, delivery_generation,
+              last_status_code, dead_letter_reason, dead_lettered_at,
+              last_redriven_at, last_redriven_by
+       FROM webhook_deliveries
+       WHERE dead_lettered_at IS NOT NULL AND delivered_at IS NULL
+       ORDER BY dead_lettered_at DESC
+       LIMIT $1`,
+      [limit],
+    );
+    return result.rows as Array<Record<string, unknown>>;
+  }
+
+  /**
+   * Re-drives a dead-lettered delivery. Only the delivery ID is accepted: the
+   * target URL comes from the stored subscription and the payload/event ID are
+   * untouched. The state transition is a single conditional UPDATE so duplicate
+   * or concurrent requests cannot both succeed.
+   *
+   * @returns the new generation, or null when the delivery is not dead-lettered.
+   */
+  static async redriveDeadLetter(
+    deliveryId: number,
+    actor: string,
+  ): Promise<{ deliveryId: number; eventId: string; generation: number } | null> {
+    const result = await query(
+      `UPDATE webhook_deliveries
+       SET dead_lettered_at = NULL,
+           dead_letter_reason = NULL,
+           attempt_count = 0,
+           delivery_generation = delivery_generation + 1,
+           next_retry_at = $2,
+           last_redriven_at = $2,
+           last_redriven_by = $3,
+           updated_at = $2
+       WHERE id = $1
+         AND dead_lettered_at IS NOT NULL
+         AND delivered_at IS NULL
+       RETURNING id, event_id, delivery_generation`,
+      [deliveryId, new Date(), actor],
+    );
+
+    const row = result.rows[0] as
+      | { id: number; event_id: string; delivery_generation: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      deliveryId: Number(row.id),
+      eventId: String(row.event_id),
+      generation: Number(row.delivery_generation),
+    };
+  }
+
   static isSupported(type: string): type is WebhookEventType {
     return SUPPORTED_WEBHOOK_EVENT_TYPES.includes(type as WebhookEventType);
   }
@@ -576,7 +680,10 @@ export class WebhookService {
       : undefined;
 
     try {
-      const response = await postWebhook(callbackUrl, body, signature);
+      const response = await postWebhook(callbackUrl, body, signature, {
+        eventId: String(payload.payload.eventId),
+        generation: 1,
+      });
 
       const successful = response.ok;
 

@@ -6,6 +6,7 @@ import { transferHistoryService } from '../services/transferHistoryService.js';
 import {
   SUPPORTED_WEBHOOK_EVENT_TYPES,
   webhookService,
+  WebhookService,
   type WebhookEventType,
 } from '../services/webhookService.js';
 import {
@@ -784,6 +785,34 @@ export const getWebhookDeliveries = async (req: Request, res: Response) => {
       message: 'Failed to fetch webhook deliveries',
     });
   }
+};
+
+export const listWebhookDeadLetters = async (req: Request, res: Response) => {
+  const limit = parseCappedLimit(req, 50);
+  const deliveries = await WebhookService.listDeadLetters(limit);
+  return res.json({ success: true, data: { deliveries } });
+};
+
+export const redriveWebhookDelivery = async (req: Request, res: Response) => {
+  const deliveryId = Number(req.params.deliveryId);
+  if (!Number.isInteger(deliveryId) || deliveryId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'deliveryId must be a positive integer',
+    });
+  }
+
+  const actor = req.user?.publicKey ?? 'unknown';
+  const result = await WebhookService.redriveDeadLetter(deliveryId, actor);
+  if (!result) {
+    return res.status(409).json({
+      success: false,
+      message: 'Delivery is not in the dead-letter state',
+    });
+  }
+
+  logger.withContext().info('Webhook delivery re-driven', { ...result, actor });
+  return res.status(202).json({ success: true, data: result });
 };
 
 export const reindexLedgerRange = async (req: Request, res: Response) => {
