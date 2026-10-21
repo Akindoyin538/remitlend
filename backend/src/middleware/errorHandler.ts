@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AppError } from '../errors/AppError.js';
 import { ErrorCode } from '../errors/errorCodes.js';
 import logger from '../utils/logger.js';
+import { PoolSaturatedError } from '../db/connection.js';
 import { Sentry } from '../config/sentry.js';
 
 /**
@@ -47,6 +48,20 @@ export const errorHandler = (
         message: 'Validation failed',
         field: firstField,
         details,
+      },
+    });
+    return;
+  }
+
+  // ── Database pool saturation: stable, retryable ──────────────
+  if (err instanceof PoolSaturatedError) {
+    res.setHeader('Retry-After', String(err.retryAfterSeconds));
+    res.status(503).json({
+      success: false,
+      message: 'Service temporarily overloaded. Please retry shortly.',
+      error: {
+        code: 'SERVICE_OVERLOADED',
+        message: 'Service temporarily overloaded. Please retry shortly.',
       },
     });
     return;

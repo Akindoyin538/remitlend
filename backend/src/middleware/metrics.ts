@@ -251,15 +251,9 @@ export async function exportAdaptiveSchedulerMetrics(
       SCHEDULER_MODE_VALUE[state.mode] ?? 0,
     );
 
-    indexerBackoffLevelGauge.set(
-      { contract_id: contractId },
-      state.consecutiveFailures,
-    );
+    indexerBackoffLevelGauge.set({ contract_id: contractId }, state.consecutiveFailures);
 
-    indexerConsecutiveFailuresGauge.set(
-      { contract_id: contractId },
-      state.consecutiveFailures,
-    );
+    indexerConsecutiveFailuresGauge.set({ contract_id: contractId }, state.consecutiveFailures);
   } catch (error) {
     logger.warn('Failed to export adaptive scheduler metrics', { contractId, error });
   }
@@ -377,3 +371,35 @@ export function updateActiveLoans(status: string, count: number): void {
 export function recordTransactionProcessingTime(duration: number, transactionType: string): void {
   transactionProcessingTimeHistogram.observe({ transaction_type: transactionType }, duration);
 }
+
+// ── PostgreSQL pool saturation (no user-identifying labels) ─────────────
+export const dbPoolWaitDurationHistogram = new client.Histogram({
+  name: 'db_pool_wait_duration_seconds',
+  help: 'Time spent waiting to acquire a PostgreSQL pool connection.',
+  buckets: [0.001, 0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [metricsRegistry],
+});
+
+export const dbPoolSaturationGauge = new client.Gauge({
+  name: 'db_pool_saturation_ratio',
+  help: 'Checked-out connections divided by DB_POOL_MAX (0-1).',
+  registers: [metricsRegistry],
+});
+
+export const dbPoolWaitingGauge = new client.Gauge({
+  name: 'db_pool_waiting_requests',
+  help: 'Requests currently queued waiting for a pool connection.',
+  registers: [metricsRegistry],
+});
+
+export const dbPoolTimeoutsCounter = new client.Counter({
+  name: 'db_pool_acquire_timeouts_total',
+  help: 'Pool acquisitions that exceeded the bounded wait deadline.',
+  registers: [metricsRegistry],
+});
+
+export const dbPoolRejectedCounter = new client.Counter({
+  name: 'db_pool_rejected_total',
+  help: 'Requests rejected immediately because the pool wait queue was full.',
+  registers: [metricsRegistry],
+});
