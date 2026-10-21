@@ -107,10 +107,41 @@ The signature step reads the amortization through `useLoanAmortizationPreview`, 
 
 ---
 
-## 5. Compatibility
+## 5. Partial repayment allocation (rule `ALLOCATION_V1`)
 
-- **Contracts:** unchanged. No contract, contract call or ledger entry is touched.
-- **API:** unchanged. The new code only *reads* the existing amortization-preview response.
+A partial repayment must reduce the outstanding balance by exactly one deterministic rule, shared by the contract, the backend preview and the borrower disclosure. The rule is versioned as **`ALLOCATION_V1`**; any change to the order, the accrual boundary or the rounding below requires a new version identifier and a migration note here.
+
+### Allocation order
+
+Every transferred amount is applied in this order, each step consuming only what remains:
+
+1. **Accrued interest** — interest accrued up to the accrual boundary (below).
+2. **Fees** — outstanding origination/service fees, in the order they were booked.
+3. **Principal** — the remaining loan principal.
+
+A payment smaller than the accrued interest reduces only interest; principal and fees are untouched. A payment exactly equal to accrued interest clears interest and leaves principal unchanged. A payment one minor unit below the payoff leaves exactly one minor unit outstanding.
+
+### Accrual boundary
+
+Accrued interest is computed at the **repayment ledger timestamp** — the close time of the ledger in which the repayment is applied — using simple interest on the outstanding principal since the last accrual boundary (loan disbursement or the previous repayment). The contract and the backend preview MUST use the same boundary; the backend preview uses the ledger close time of the simulated repayment, not wall-clock time at request handling.
+
+### Rounding and dust
+
+- Interest is computed with `mulDiv` (floor) at the asset's own precision, once, at the accrual boundary. No intermediate rounding.
+- Any residual below one minor unit is **not** carried forward and is **not** added to principal; it is dropped at the boundary so the same interval is never double-counted.
+- The sum of the applied components equals the transferred amount exactly: `appliedInterest + appliedFees + appliedPrincipal === transferred`. No wei is created or destroyed.
+- A successful call MUST NOT reduce the pool receivable by more than the amount actually transferred. Overpayment beyond the full payoff is rejected (or refunded) rather than silently absorbed.
+
+### Shared vectors
+
+The contract and backend MUST return identical component balances for the shared regression vectors: payment below accrued interest, exactly accrued interest, one unit below payoff, overpayment, and repeated small payments. These vectors live alongside the contract tests and are replayed against the backend money calculations.
+
+---
+
+## 6. Compatibility
+
+- **Contracts:** settlement now follows `ALLOCATION_V1` (interest → fees → principal) with the accrual boundary and dust rules above. No ledger entry shape changes.
+- **API:** unchanged response shape; component balances now match the contract for the shared vectors.
 - **Persisted data:** unchanged. Nothing is written to storage.
 - **Behavioural change:** the disclosed "Total Repayment" and APR on the signature step now come from the exact engine and the authoritative schedule. Where the old inline float maths disagreed with the server by a fraction of a cent, the server value is now shown. Interest is still submitted at `DEFAULT_LOAN_ANNUAL_RATE_BPS / 100`, i.e. the same 12 % as before.
 
@@ -123,35 +154,11 @@ The signature step reads the amortization through `useLoanAmortizationPreview`, 
 
 ---
 
-## 6. Threat model notes
+## 7. Threat model notes
 
 | Threat | Mitigation |
 |---|---|
 | **Misleading cost disclosure** — a borrower signs believing the loan is cheaper than it is. | Effective APR is always shown next to the nominal rate; the total is the exact sum of the disclosed components; server totals override local ones on divergence. |
 | **Float rounding drift** — a float-derived total that does not match settlement. | All arithmetic is `bigint`; `number` only ever appears after `toFixed(decimals)` for display. |
-| **Attacker-controlled input** — a crafted amount string that hangs or corrupts the render. | Length/term/rate caps, a strict numeric grammar, and a non-throwing typed error for everything else. |
-| **Fee evasion** — a fee that is charged but not disclosed. | The engine is the only place fees are computed, and the disclosure is built from the same object that feeds the transaction preview. |
-| **Stale data** — the disclosure is computed from an old amount. | The disclosure is derived from the current wizard state on every render; reconciliation against the server runs on the same render. |
-
----
-
-## 7. Testing
-
-```bash
-cd frontend
-npx jest src/app/utils/loanCostDisclosure.test.ts
-npx jest src/app/components/loan/__tests__/LoanCostDisclosurePanel.test.tsx
-```
-
-`loanCostDisclosure.test.ts` covers: exact rounding (half-up, sign, zero-denominator guard), decimal parsing including malformed/exponential/over-length input, the interest and fee formulas, the effective-APR annualisation across terms, every typed error code, hostile input (`undefined`, `null`, 5 000-digit strings, `Number.MAX_SAFE_INTEGER`), all three reconciliation states, immutability of `applyAuthoritativeTotals`, and the formatting helpers.
-
-`LoanCostDisclosurePanel.test.tsx` covers: itemisation, nominal vs effective APR, the total-equals-sum invariant, due date, the separate network fee, suppression of zero-fee rows, the rounding notice, the estimate/authoritative badge, the divergence warning, the stale-schedule notice, the screen-reader summary, and the typed-error component.
-
----
-
-## 8. Related documentation
-
-- [Risk Disclosure](risk-disclosure.md) — the borrower-facing risk surface.
-- [Wallet Transaction UX](wallet-transaction-ux.md) — signing, preview and polling rules.
-- [Transaction Recovery UX](transaction-recovery-ux.md) — what happens when a request is rejected or expires.
-- [Architecture](../ARCHITECTURE.md)
+| **Allocation divergence** — contract, preview and disclosure apply different rules, so the displayed payoff differs from settlement. | Single versioned rule `ALLOCATION_V1` with an explicit accrual boundary and dust handling, replayed against shared vectors. |
+| **Receivable over-reduction** — a call reduces the pool receivable by more than was transferred. | Applied components sum exactly to the transferred amount; overpayment is rejected/refunded. |
