@@ -117,15 +117,18 @@ class CacheService {
   /**
    * Delete a value from the cache.
    * @param key The cache key
+   * @returns false when Redis was unreachable and the key may still be cached
    */
-  async delete(key: string): Promise<void> {
+  async delete(key: string): Promise<boolean> {
     try {
       await this.ensureConnected();
       await this.client!.del(key);
+      return true;
     } catch (error) {
       if (process.env.NODE_ENV !== 'test') {
         logger.withContext().error(`Error deleting cache for key ${key}`, { error });
       }
+      return false;
     }
   }
 

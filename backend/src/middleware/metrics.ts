@@ -97,6 +97,28 @@ export const cacheMissRateCounter = new client.Counter({
   registers: [metricsRegistry],
 });
 
+/** Bounded labels: resource is a CacheResource name, outcome is a fixed enum. */
+export const cacheStaleReadCounter = new client.Counter({
+  name: 'cache_stale_reads_total',
+  help: 'Financial cache reads by resource and outcome (fresh, miss, backend_error, race_skipped).',
+  labelNames: ['resource', 'outcome'] as const,
+  registers: [metricsRegistry],
+});
+
+export const cacheInvalidationFailureCounter = new client.Counter({
+  name: 'cache_invalidation_failures_total',
+  help: 'Cache invalidations that could not be confirmed (Redis unreachable), by resource.',
+  labelNames: ['resource'] as const,
+  registers: [metricsRegistry],
+});
+
+export const cacheInvalidationCounter = new client.Counter({
+  name: 'cache_invalidations_total',
+  help: 'Cache invalidations attempted, by resource.',
+  labelNames: ['resource'] as const,
+  registers: [metricsRegistry],
+});
+
 export const loanApprovalRateCounter = new client.Counter({
   name: 'loan_approvals_total',
   help: 'Total number of approved loans.',
