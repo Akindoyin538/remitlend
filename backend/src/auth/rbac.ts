@@ -11,8 +11,10 @@ export const ROLE_SCOPES: Record<UserRole, string[]> = {
     'write:notifications',
     'read:remittances',
     'write:remittances',
+    'read:webhooks',
+    'write:webhooks',
   ],
-  lender: ['read:loans', 'read:pool', 'write:loans'],
+  lender: ['read:loans', 'read:pool', 'write:loans', 'read:webhooks', 'write:webhooks'],
 };
 
 const parseWalletSet = (wallets: string | undefined): Set<string> => {

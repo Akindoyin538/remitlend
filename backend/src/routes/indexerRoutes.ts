@@ -7,7 +7,9 @@ import {
   getRecentEvents,
   listWebhookSubscriptions,
   createWebhookSubscription,
+  updateWebhookSubscription,
   deleteWebhookSubscription,
+  getWebhookSubscriptionAudit,
 } from '../controllers/indexerController.js';
 import { requireApiKey } from '../middleware/auth.js';
 import { requireJwtAuth, requireScopes, requireWalletOwnership } from '../middleware/jwtAuth.js';
@@ -205,7 +207,7 @@ router.get('/events/recent', requireApiKey('admin:indexer'), getRecentEvents);
  *     summary: List webhook subscriptions
  *     tags: [Indexer]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     responses:
  *       200:
  *         description: Webhook subscriptions retrieved successfully
@@ -214,9 +216,9 @@ router.get('/events/recent', requireApiKey('admin:indexer'), getRecentEvents);
  *             schema:
  *               $ref: '#/components/schemas/WebhookSubscriptionListResponse'
  *       401:
- *         description: Missing or invalid API key
+ *         description: Missing or invalid bearer token
  */
-router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscriptions);
+router.get('/webhooks', requireJwtAuth, requireScopes('read:webhooks'), listWebhookSubscriptions);
 
 /**
  * @swagger
@@ -225,7 +227,7 @@ router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscription
  *     summary: Register a webhook subscription
  *     tags: [Indexer]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -251,14 +253,51 @@ router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscription
  *             schema:
  *               $ref: '#/components/schemas/WebhookSubscriptionResponse'
  *       401:
- *         description: Missing or invalid API key
+ *         description: Missing or invalid bearer token
  */
 router.post(
   '/webhooks',
-  requireApiKey('admin:webhooks'),
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
   strictRateLimiter,
   auditLog,
   createWebhookSubscription,
+);
+
+/**
+ * @swagger
+ * /indexer/webhooks/{subscriptionId}:
+ *   put:
+ *     summary: Update an owned webhook subscription
+ *     tags: [Indexer]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: subscriptionId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Subscription updated
+ *       404:
+ *         description: Subscription not found or not owned by the caller
+ */
+router.put(
+  '/webhooks/:subscriptionId',
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
+  strictRateLimiter,
+  auditLog,
+  updateWebhookSubscription,
+);
+
+router.get(
+  '/webhooks/:subscriptionId/audit',
+  requireJwtAuth,
+  requireScopes('read:webhooks'),
+  getWebhookSubscriptionAudit,
 );
 
 /**
@@ -268,7 +307,7 @@ router.post(
  *     summary: Delete a webhook subscription
  *     tags: [Indexer]
  *     security:
- *       - ApiKeyAuth: []
+ *       - BearerAuth: []
  *     parameters:
  *       - in: path
  *         name: subscriptionId
@@ -283,11 +322,12 @@ router.post(
  *             schema:
  *               $ref: '#/components/schemas/SuccessMessageResponse'
  *       401:
- *         description: Missing or invalid API key
+ *         description: Missing or invalid bearer token
  */
 router.delete(
   '/webhooks/:subscriptionId',
-  requireApiKey('admin:webhooks'),
+  requireJwtAuth,
+  requireScopes('write:webhooks'),
   strictRateLimiter,
   auditLog,
   deleteWebhookSubscription,
