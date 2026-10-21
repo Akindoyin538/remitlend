@@ -35,6 +35,11 @@ import {
   replayLoanStateEndpoint,
 } from '../controllers/loanStateEventController.js';
 
+import {
+  listDiscrepancies,
+  resolveDiscrepancy,
+} from '../services/discrepancyLedgerService.js';
+
 const router = Router();
 
 router.get('/audit-logs', requireJwtAuth, requireRoles('admin'), listAuditLogs);
@@ -536,6 +541,66 @@ router.post(
   strictRateLimiter,
   auditLog,
   asyncHandler(redriveWebhookDelivery),
+);
+
+/**
+ * @swagger
+ * /admin/discrepancies:
+ *   get:
+ *     summary: Read-only view of the reconciliation discrepancy ledger
+ *     tags: [Admin]
+ *     responses:
+ *       200:
+ *         description: Discrepancy records
+ */
+router.get(
+  '/discrepancies',
+  requireJwtAuth,
+  requireRoles('admin'),
+  asyncHandler(async (req, res) => {
+    const limit = Number(req.query.limit);
+    const rows = await listDiscrepancies({
+      ...(typeof req.query.status === 'string' ? { status: req.query.status } : {}),
+      ...(typeof req.query.severity === 'string' ? { severity: req.query.severity } : {}),
+      ...(Number.isInteger(limit) && limit > 0 ? { limit } : {}),
+    });
+    res.json({ success: true, data: { discrepancies: rows } });
+  }),
+);
+
+const resolveDiscrepancySchema = z.object({
+  reason: z.string().min(10),
+  evidence: z.record(z.string(), z.unknown()),
+});
+
+/**
+ * @swagger
+ * /admin/discrepancies/{id}/resolve:
+ *   post:
+ *     summary: Record the resolution of a discrepancy (no financial correction)
+ *     tags: [Admin]
+ *     responses:
+ *       200:
+ *         description: Discrepancy resolved
+ */
+router.post(
+  '/discrepancies/:id/resolve',
+  requireJwtAuth,
+  requireRoles('admin'),
+  // Separate credential from the read-only view: resolution needs the scoped key too.
+  requireApiKey('admin:reconciliation'),
+  strictRateLimiter,
+  validateBody(resolveDiscrepancySchema),
+  auditLog,
+  asyncHandler(async (req, res) => {
+    await resolveDiscrepancy({
+      discrepancyId: Number(req.params.id),
+      actor: req.user!.publicKey,
+      reason: req.body.reason,
+      evidence: req.body.evidence,
+    });
+    res.json({ success: true });
+  }),
 );
 
 export default router;
