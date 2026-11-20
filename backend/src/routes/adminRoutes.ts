@@ -36,6 +36,7 @@ import {
   replayLoanStateEndpoint,
 } from '../controllers/loanStateEventController.js';
 
+import { getReconcilerStatus } from '../services/crossContractReconciler.js';
 import { listDiscrepancies } from '../services/discrepancyLedgerService.js';
 import {
   createRequest as createPrivilegedRequest,
@@ -569,6 +570,25 @@ router.post(
   strictRateLimiter,
   auditLog,
   asyncHandler(redriveWebhookDelivery),
+);
+
+/**
+ * @swagger
+ * /admin/reconciliation/status:
+ *   get:
+ *     summary: Last cross-contract reconciler run time, duration and divergence count
+ *     tags: [Admin]
+ *     responses:
+ *       200:
+ *         description: Reconciler status
+ */
+router.get(
+  '/reconciliation/status',
+  requireJwtAuth,
+  requireRoles('admin'),
+  asyncHandler(async (_req, res) => {
+    res.json({ success: true, data: getReconcilerStatus() });
+  }),
 );
 
 /**
