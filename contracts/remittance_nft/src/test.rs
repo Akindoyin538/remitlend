@@ -2283,3 +2283,24 @@ fn test_admin_remint_rejects_bad_commitment() {
     let stored = client.get_recipient_commitment(&user);
     assert_eq!(stored, new_commitment);
 }
+
+#[test]
+fn test_storage_version_and_lazy_v1_to_v2_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+    client.initialize(&admin);
+
+    // Fresh deployments are already on the current schema.
+    assert_eq!(client.get_storage_version(), 2);
+
+    // A legacy v1 `Score` entry is migrated lazily on first read, without panicking.
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Score(user.clone()), &640u32);
+    });
+    assert_eq!(client.get_score(&user), 640);
+    assert!(client.get_metadata(&user).is_some());
+}

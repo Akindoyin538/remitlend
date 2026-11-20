@@ -3907,3 +3907,27 @@ fn test_set_rate_oracle_emits_rate_oracle_updated_event() {
         "RateOracleUpdated event should be emitted"
     );
 }
+
+#[test]
+fn test_get_storage_version_after_migrate_and_lazy_upgrade() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (manager, _nft, _pool, _token, _admin) = setup_test(&env);
+
+    // Fresh init is on the current schema.
+    assert_eq!(manager.get_storage_version(), 4);
+
+    // Simulate a contract still on the v3 schema with the v4 defaults missing.
+    env.as_contract(&manager.address, || {
+        env.storage().instance().set(&DataKey::MigratedVersion, &3u32);
+        env.storage().instance().remove(&DataKey::MinRateBps);
+    });
+    assert_eq!(manager.get_storage_version(), 3);
+
+    // First read lazily migrates; no panic and the version is advanced.
+    let _ = manager.try_get_loan(&1);
+    assert_eq!(manager.get_storage_version(), 4);
+    env.as_contract(&manager.address, || {
+        assert!(env.storage().instance().has(&DataKey::MinRateBps));
+    });
+}

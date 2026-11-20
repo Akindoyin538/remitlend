@@ -4,6 +4,8 @@ use soroban_sdk::{
     String, Symbol, Vec,
 };
 
+pub mod migration;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NftError {
@@ -212,6 +214,13 @@ impl RemittanceNFT {
             return Some(metadata);
         }
 
+        Self::migrate_v1_to_v2(env, user)
+    }
+
+    /// Schema step v1 -> v2 for one user: legacy `Score` entry -> `Metadata` struct.
+    /// Lazy and idempotent; returns None when the user has no legacy entry.
+    fn migrate_v1_to_v2(env: &Env, user: &Address) -> Option<RemittanceMetadata> {
+        let metadata_key = DataKey::Metadata(user.clone());
         let score_key = DataKey::Score(user.clone());
         if let Some(score) = env.storage().persistent().get::<DataKey, u32>(&score_key) {
             let migrated_metadata = RemittanceMetadata {
@@ -387,6 +396,11 @@ impl RemittanceNFT {
             return Err(NftError::ContractPaused);
         }
         Ok(())
+    }
+
+    /// Read-only: which storage schema version is live (lets operators verify an upgrade).
+    pub fn get_storage_version(env: Env) -> u32 {
+        <Self as migration::MigrationHelper>::storage_version(&env)
     }
 
     pub fn version(env: Env) -> u32 {
@@ -1251,3 +1265,25 @@ impl RemittanceNFT {
 
 #[cfg(test)]
 mod test;
+
+impl migration::MigrationHelper for RemittanceNFT {
+    const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
+
+    fn storage_version(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::Version).unwrap_or(0)
+    }
+
+    fn set_storage_version(env: &Env, version: u32) {
+        env.storage().instance().set(&DataKey::Version, &version);
+    }
+
+    fn migrate_step(env: &Env, _from: u32) {
+        // Per-user Score -> Metadata entries migrate lazily on read (migrate_v1_to_v2);
+        // the only instance-level step is the burn-threshold default.
+        if !env.storage().instance().has(&Self::burn_threshold_key()) {
+            env.storage()
+                .instance()
+                .set(&Self::burn_threshold_key(), &Self::DEFAULT_BURN_THRESHOLD);
+        }
+    }
+}

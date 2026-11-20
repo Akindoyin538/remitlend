@@ -135,6 +135,9 @@ impl UpgradeProxy {
             .instance()
             .set(&UpgradeProxyKey::CurrentWasm, &scheduled.wasm_hash);
 
+        // Run pending storage migrations in the same transaction as the upgrade.
+        <crate::LoanManager as crate::migration::MigrationHelper>::migrate_to_current(env);
+
         // Clear scheduled upgrade
         env.storage()
             .instance()

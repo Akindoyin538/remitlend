@@ -30,6 +30,7 @@ pub trait LendingPoolInterface {
 }
 
 mod events;
+pub mod migration;
 pub mod upgrade_proxy;
 
 #[contracterror]
@@ -1011,6 +1012,11 @@ impl LoanManager {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
+    /// Read-only: which storage schema version is live (lets operators verify an upgrade).
+    pub fn get_storage_version(env: Env) -> u32 {
+        Self::storage_version_of(&env)
+    }
+
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         Self::admin(&env).require_auth();
         let old_version = Self::version(env.clone());
@@ -1040,53 +1046,7 @@ impl LoanManager {
             return;
         }
 
-        // Initialize new storage keys with defaults if they don't exist
-        if !env.storage().instance().has(&DataKey::LateFeeRateBps) {
-            env.storage()
-                .instance()
-                .set(&DataKey::LateFeeRateBps, &Self::DEFAULT_LATE_FEE_RATE_BPS);
-        }
-        if !env
-            .storage()
-            .instance()
-            .has(&DataKey::LiquidationThresholdBps)
-        {
-            env.storage().instance().set(
-                &DataKey::LiquidationThresholdBps,
-                &Self::DEFAULT_LIQUIDATION_THRESHOLD_BPS,
-            );
-        }
-        if !env.storage().instance().has(&DataKey::LiquidationBonusBps) {
-            env.storage().instance().set(
-                &DataKey::LiquidationBonusBps,
-                &Self::DEFAULT_LIQUIDATION_BONUS_BPS,
-            );
-        }
-
-        // Initialize rate bounds if they don't exist
-        if !env.storage().instance().has(&DataKey::MinRateBps) {
-            env.storage()
-                .instance()
-                .set(&DataKey::MinRateBps, &Self::MIN_RATE_BPS);
-        }
-        if !env.storage().instance().has(&DataKey::MaxRateBps) {
-            env.storage()
-                .instance()
-                .set(&DataKey::MaxRateBps, &Self::MAX_RATE_BPS);
-        }
-
-        let late_fee_rate = Self::late_fee_rate_bps(&env);
-        env.storage()
-            .instance()
-            .set(&DataKey::LateFeeRateBps, &late_fee_rate);
-
-        // Update contract version and mark migration as complete
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &Self::CURRENT_VERSION);
-        env.storage()
-            .instance()
-            .set(&DataKey::MigratedVersion, &Self::CURRENT_VERSION);
+        Self::migrate_v3_to_v4(&env);
         Self::bump_instance_ttl(&env);
     }
 
@@ -1298,6 +1258,7 @@ impl LoanManager {
     }
 
     pub fn get_loan(env: Env, loan_id: u32) -> Result<Loan, LoanError> {
+        Self::lazy_migrate(&env);
         let loan_key = DataKey::Loan(loan_id);
         let mut loan: Loan = env
             .storage()
@@ -2916,6 +2877,96 @@ impl LoanManager {
         }
 
         Ok(defaulted_count)
+    }
+}
+
+impl LoanManager {
+    /// Lazily bring storage to the current schema when an older marker is recorded.
+    fn lazy_migrate(env: &Env) {
+        if env.storage().instance().has(&DataKey::MigratedVersion) {
+            <Self as migration::MigrationHelper>::migrate_to_current(env);
+        }
+    }
+
+    /// Schema step v3 -> v4: initialise late-fee / liquidation / rate-bound keys.
+    /// Idempotent: existing values are never overwritten.
+    fn migrate_v3_to_v4(env: &Env) {
+        // Initialize new storage keys with defaults if they don't exist
+        if !env.storage().instance().has(&DataKey::LateFeeRateBps) {
+            env.storage()
+                .instance()
+                .set(&DataKey::LateFeeRateBps, &Self::DEFAULT_LATE_FEE_RATE_BPS);
+        }
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::LiquidationThresholdBps)
+        {
+            env.storage().instance().set(
+                &DataKey::LiquidationThresholdBps,
+                &Self::DEFAULT_LIQUIDATION_THRESHOLD_BPS,
+            );
+        }
+        if !env.storage().instance().has(&DataKey::LiquidationBonusBps) {
+            env.storage().instance().set(
+                &DataKey::LiquidationBonusBps,
+                &Self::DEFAULT_LIQUIDATION_BONUS_BPS,
+            );
+        }
+
+        // Initialize rate bounds if they don't exist
+        if !env.storage().instance().has(&DataKey::MinRateBps) {
+            env.storage()
+                .instance()
+                .set(&DataKey::MinRateBps, &Self::MIN_RATE_BPS);
+        }
+        if !env.storage().instance().has(&DataKey::MaxRateBps) {
+            env.storage()
+                .instance()
+                .set(&DataKey::MaxRateBps, &Self::MAX_RATE_BPS);
+        }
+
+        let late_fee_rate = Self::late_fee_rate_bps(env);
+        env.storage()
+            .instance()
+            .set(&DataKey::LateFeeRateBps, &late_fee_rate);
+
+        // Update contract version and mark migration as complete
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &Self::CURRENT_VERSION);
+        env.storage()
+            .instance()
+            .set(&DataKey::MigratedVersion, &Self::CURRENT_VERSION);
+    }
+
+    /// Read-only: the storage schema version that is currently live.
+    pub fn storage_version_of(env: &Env) -> u32 {
+        <Self as migration::MigrationHelper>::storage_version(env)
+    }
+}
+
+impl migration::MigrationHelper for LoanManager {
+    const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
+
+    fn storage_version(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MigratedVersion)
+            .or_else(|| env.storage().instance().get(&DataKey::Version))
+            .unwrap_or(0)
+    }
+
+    fn set_storage_version(env: &Env, version: u32) {
+        env.storage()
+            .instance()
+            .set(&DataKey::MigratedVersion, &version);
+        env.storage().instance().set(&DataKey::Version, &version);
+    }
+
+    fn migrate_step(env: &Env, _from: u32) {
+        // v0..=v3 all converge on the v4 schema.
+        Self::migrate_v3_to_v4(env);
     }
 }
 

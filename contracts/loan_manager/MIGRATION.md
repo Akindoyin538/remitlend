@@ -93,3 +93,23 @@ If a migration fails or needs to be rolled back:
   - Added rate bounds (MIN_RATE_BPS, MAX_RATE_BPS)
   - Added liquidation bonus cap (MAX_LIQUIDATION_BONUS_BPS = 2000)
   - Migration guard prevents double-execution
+
+
+## MigrationHelper pattern (lazy, versioned migrations)
+
+Both `loan_manager` and `remittance_nft` implement the `MigrationHelper` trait
+(`src/migration.rs`):
+
+- `SCHEMA_VERSION` – schema version this build expects.
+- `storage_version(env)` / `set_storage_version(env, v)` – version recorded in storage.
+- `migrate_step(env, from)` – runs `migrate_v{from}_to_v{from+1}`; must be idempotent.
+- `migrate_to_current(env)` – applies every pending step in order.
+
+Rules for adding a new schema version `N+1`:
+
+1. Bump `CURRENT_VERSION` and add `migrate_vN_to_vN+1`, dispatched from `migrate_step`.
+2. Keep the legacy struct/key readable so old entries never panic on deserialization.
+3. Migrate lazily: reads call `migrate_to_current` (instance data, e.g. `get_loan`) or a
+   per-key migration (e.g. `remittance_nft::get_or_migrate_metadata`) and write the new shape back.
+4. `UpgradeProxy::execute_upgrade` calls `migrate_to_current` in the upgrade transaction.
+5. Operators verify the live schema with the read-only `get_storage_version()` entry point.
