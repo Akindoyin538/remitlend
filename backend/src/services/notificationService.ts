@@ -10,7 +10,8 @@ export type NotificationType =
   | 'repayment_confirmed'
   | 'loan_defaulted'
   | 'loan_liquidated'
-  | 'score_changed';
+  | 'score_changed'
+  | 'api_key_expiring';
 
 export type NotificationStatus = 'unread' | 'read' | 'archived';
 
@@ -80,6 +81,10 @@ function buildEmailTemplate(
   message: string,
 ): { subject: string; html: string } {
   const templates: Record<NotificationType, { subject: string; html: string }> = {
+    api_key_expiring: {
+      subject: 'API key expiring soon — RemitLend',
+      html: `<h2>API Key Expiring</h2><p>${message}</p>`,
+    },
     loan_approved: {
       subject: 'Your loan has been approved — RemitLend',
       html: `<h2>Loan Approved</h2><p>${message}</p><p>Log in to view your loan details and repayment schedule.</p>`,

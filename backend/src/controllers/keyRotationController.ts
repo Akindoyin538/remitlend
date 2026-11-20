@@ -14,6 +14,29 @@ import type { Request, Response, NextFunction } from 'express';
 import { keyRotationService } from '../services/keyRotationService.js';
 import { query } from '../db/connection.js';
 import { AppError } from '../errors/AppError.js';
+import cron from 'node-cron';
+import { notifyExpiringApiKeys } from '../services/apiKeyService.js';
+import logger from '../utils/logger.js';
+
+let expiryTask: cron.ScheduledTask | null = null;
+
+/** Daily cron: notify users 7 days before their API key expires (#792). */
+export function startApiKeyExpiryCron(): void {
+  if (expiryTask) return;
+  expiryTask = cron.schedule('15 6 * * *', async () => {
+    try {
+      const count = await notifyExpiringApiKeys();
+      logger.withContext().info('API key expiry notifications sent', { count });
+    } catch (error) {
+      logger.withContext().error('API key expiry cron failed', { error });
+    }
+  });
+}
+
+export function stopApiKeyExpiryCron(): void {
+  expiryTask?.stop();
+  expiryTask = null;
+}
 
 /**
  * Start a new key rotation batch.

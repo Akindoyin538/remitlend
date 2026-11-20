@@ -8,6 +8,7 @@ import {
   type JwtPayload,
   getTokenTtl,
 } from '../services/authService.js';
+import { API_KEY_PREFIX, lookupApiKey } from '../services/apiKeyService.js';
 
 const DEFAULT_JWT_COOKIE_NAME = 'remitlend_jwt';
 
@@ -77,6 +78,27 @@ export const requireJwtAuth = async (
   const token = extractBearerToken(authHeader) ?? cookieToken ?? null;
   if (!token) {
     throw AppError.unauthorized('Missing or invalid Authorization header');
+  }
+
+  if (token.startsWith(API_KEY_PREFIX)) {
+    const lookup = await lookupApiKey(token);
+    if (lookup.status !== 'valid') {
+      res.set('WWW-Authenticate', 'Bearer error="invalid_token"');
+      throw AppError.unauthorized(
+        lookup.status === 'expired' ? 'API key has expired' : 'Invalid API key',
+      );
+    }
+    const keyRole = resolveRoleForWallet(lookup.key.owner);
+    const roleScopes = new Set(resolveScopesForRole(keyRole));
+    req.user = {
+      publicKey: lookup.key.owner,
+      role: keyRole,
+      scopes: lookup.key.scopes.filter((scope) => roleScopes.has(scope)),
+      jti: `apikey:${lookup.key.id}`,
+      iat: 0,
+      exp: Math.floor(lookup.key.expiresAt.getTime() / 1000),
+    };
+    return next();
   }
 
   const payload = verifyJwtToken(token);

@@ -204,3 +204,49 @@ describe('requireApiKey – scope support', () => {
     });
   });
 });
+
+describe('user API keys – expiry and rotation (#792)', () => {
+  it('validates expiry bounds (max 1 year, must be future)', async () => {
+    const { resolveExpiry } = await import('../services/apiKeyService.js');
+    const now = Date.now();
+    expect(() => resolveExpiry(new Date(now - 1000).toISOString(), now)).toThrow();
+    expect(() => resolveExpiry(new Date(now + 366 * 864e5).toISOString(), now)).toThrow();
+    expect(resolveExpiry(new Date(now + 864e5).toISOString(), now).getTime()).toBe(now + 864e5);
+  });
+
+  it('rotates atomically in one transaction and notifies at T-7 days', async () => {
+    const { jest } = await import('@jest/globals');
+    jest.resetModules();
+    const clientQuery = jest.fn<(sql: string, p?: unknown[]) => Promise<unknown>>(async (sql) => {
+      if (sql.includes('FOR UPDATE'))
+        return { rows: [{ id: 1, owner: 'GABC', name: 'k', scopes: ['a'], expires_at: new Date(), revoked_at: null }] };
+      if (sql.includes('INSERT'))
+        return { rows: [{ id: 2, owner: 'GABC', name: 'k', scopes: ['a'], expires_at: new Date() }] };
+      return { rows: [] };
+    });
+    const withTransaction = jest.fn(async (fn: (c: unknown) => unknown) => fn({ query: clientQuery }));
+    const dbQuery = jest.fn<(sql: string, p?: unknown[]) => Promise<unknown>>(async (sql) =>
+      sql.includes('SELECT id, owner')
+        ? { rows: [{ id: 2, owner: 'GABC', name: 'k', expires_at: new Date(Date.now() + 864e5) }] }
+        : { rows: [] },
+    );
+    const createNotification = jest.fn(async () => ({}));
+    jest.unstable_mockModule('../db/connection.js', () => ({ query: dbQuery, withTransaction }));
+    jest.unstable_mockModule('../services/notificationService.js', () => ({
+      notificationService: { createNotification },
+    }));
+    const svc = await import('../services/apiKeyService.js');
+
+    const rotated = await svc.rotateApiKey(1, 'GABC');
+    expect(withTransaction).toHaveBeenCalledTimes(1);
+    const sqls = clientQuery.mock.calls.map(([s]) => s);
+    expect(sqls.some((s) => s.includes('SET revoked_at'))).toBe(true);
+    expect(sqls.some((s) => s.includes('INSERT INTO user_api_keys'))).toBe(true);
+    expect(rotated.key.startsWith('rlk_')).toBe(true);
+
+    expect(await svc.notifyExpiringApiKeys()).toBe(1);
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'GABC', type: 'api_key_expiring' }),
+    );
+  });
+});

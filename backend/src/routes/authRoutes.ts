@@ -10,6 +10,7 @@ import {
 } from '../middleware/rateLimiter.js';
 import { requireJwtAuth } from '../middleware/jwtAuth.js';
 import { validateBody } from '../middleware/validation.js';
+import { createUserApiKey, rotateUserApiKey } from '../controllers/apiKeyController.js';
 import { authSecurityMiddleware } from '../middleware/authSecurity.js';
 
 const router = Router();
@@ -195,5 +196,59 @@ router.post('/introspect', validateBody(z.object({ token: z.string().min(1) })),
  *         description: Invalid or expired refresh token
  */
 router.post('/refresh', validateBody(z.object({ refreshToken: z.string().min(1) })), refreshAccessToken);
+
+const createApiKeySchema = z.object({
+  name: z.string().max(100).optional(),
+  scopes: z.array(z.string().min(1)).optional(),
+  expiresAt: z.string().optional(),
+});
+
+/**
+ * @swagger
+ * /auth/api-keys:
+ *   post:
+ *     summary: Create a scoped API key with an expiry
+ *     description: Returns the key once. Scopes must be a subset of the caller's scopes. expiresAt (ISO 8601) is at most 1 year out and defaults to 1 year. Present the key as a Bearer token; expired keys get 401 with `WWW-Authenticate Bearer error="invalid_token"`.
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string }
+ *               scopes: { type: array, items: { type: string } }
+ *               expiresAt: { type: string, format: date-time }
+ *     responses:
+ *       201:
+ *         description: Key created
+ *       400:
+ *         description: Invalid expiry or scopes
+ */
+router.post('/api-keys', requireJwtAuth, validateBody(createApiKeySchema), createUserApiKey);
+
+/**
+ * @swagger
+ * /auth/api-keys/{id}/rotate:
+ *   post:
+ *     summary: Rotate an API key
+ *     description: Atomically revokes the key and issues a new one with the same scopes and a fresh expiry.
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: New key issued
+ *       404:
+ *         description: Key not found
+ */
+router.post('/api-keys/:id/rotate', requireJwtAuth, rotateUserApiKey);
 
 export default router;

@@ -35,6 +35,7 @@ import {
 } from './services/crossContractReconciler.js';
 import { sorobanService } from './services/sorobanService.js';
 import { validateLoanConfigOnStartup } from './config/loanConfig.js';
+import { startApiKeyExpiryCron, stopApiKeyExpiryCron } from './controllers/keyRotationController.js';
 import { startLoanDueCheckCron, stopLoanDueCheckCron } from './cron/loanCheckCron.js';
 import {
   startContractVerificationCron,
@@ -116,6 +117,9 @@ const server = app.listen(port, () => {
   // Start contract verification polling against Stellar explorer
   startContractVerificationCron();
 
+  // Notify users 7 days before API key expiry
+  startApiKeyExpiryCron();
+
   // Wire up and activate the score decay daily scheduler loop
   scoreDecaySchedulerHandle = startScoreDecayScheduler() || null;
 });
@@ -161,6 +165,7 @@ const shutdown = async (signal: 'SIGTERM' | 'SIGINT') => {
 
     stopLoanDueCheckCron();
     stopContractVerificationCron();
+    stopApiKeyExpiryCron();
     await stopIndexer();
     stopDefaultCheckerScheduler();
     stopWebhookRetryProcessor();
