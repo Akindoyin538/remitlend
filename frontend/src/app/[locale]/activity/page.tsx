@@ -130,7 +130,8 @@ export default function ActivityPage() {
   } = useWindowedList({
     itemCount: allActivity.length,
     itemHeight: ACTIVITY_ROW_HEIGHT,
-    overscan: 100,
+    overscan: 5,
+    storageKey: "activity-list",
   });
 
   // Preserve scroll position across re-renders, reset it only on filter change.
@@ -253,9 +254,11 @@ export default function ActivityPage() {
             </div>
           ) : (
             (() => {
-              const renderRow = (item: ActivityItem) => (
+              const renderRow = (item: ActivityItem, i: number) => (
                 <div
                   key={item.id}
+                  aria-setsize={allActivity.length}
+                  aria-posinset={(shouldVirtualize ? vStart : 0) + i + 1}
                   className="flex h-[82px] items-center justify-between border-b border-zinc-200 p-4 transition-colors last:border-b-0 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900/50"
                   role="listitem"
                 >

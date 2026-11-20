@@ -21,8 +21,10 @@ export interface UseWindowedListOptions {
   itemCount: number;
   /** Fixed rendered height of a single row, in pixels. */
   itemHeight: number;
-  /** Rows to render outside the viewport on each side. Defaults to 100. */
+  /** Rows to render outside the viewport on each side. Defaults to 5. */
   overscan?: number;
+  /** When set, scrollTop is saved to sessionStorage and restored on mount (back-navigation). */
+  storageKey?: string;
 }
 
 export interface WindowedRange {
@@ -43,7 +45,8 @@ export interface WindowedRange {
 export function useWindowedList({
   itemCount,
   itemHeight,
-  overscan = 100,
+  overscan = 5,
+  storageKey,
 }: UseWindowedListOptions): WindowedRange {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -56,7 +59,28 @@ export function useWindowedList({
     const measure = () => setViewportHeight(node.clientHeight);
     measure();
 
-    const onScroll = () => setScrollTop(node.scrollTop);
+    if (storageKey) {
+      try {
+        const saved = Number(window.sessionStorage.getItem(`windowed:${storageKey}`));
+        if (Number.isFinite(saved) && saved > 0) {
+          node.scrollTop = saved;
+          setScrollTop(saved);
+        }
+      } catch {
+        // sessionStorage unavailable; start at the top.
+      }
+    }
+
+    const onScroll = () => {
+      setScrollTop(node.scrollTop);
+      if (storageKey) {
+        try {
+          window.sessionStorage.setItem(`windowed:${storageKey}`, String(node.scrollTop));
+        } catch {
+          // ignore
+        }
+      }
+    };
     node.addEventListener("scroll", onScroll, { passive: true });
 
     const resizeObserver =
@@ -67,7 +91,7 @@ export function useWindowedList({
       node.removeEventListener("scroll", onScroll);
       resizeObserver?.disconnect();
     };
-  }, []);
+  }, [storageKey]);
 
   const scrollTo = useCallback((next: number) => {
     const node = containerRef.current;

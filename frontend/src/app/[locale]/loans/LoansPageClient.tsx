@@ -11,9 +11,12 @@ import { PaginationControls } from "../../components/ui/PaginationControls";
 import { useWalletStore, selectWalletAddress } from "../../stores/useWalletStore";
 import { useTranslations, useLocale } from "next-intl";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { WindowedList } from "../../components/ui/WindowedList";
 import { PrintButton } from "../../components/ui/PrintButton";
 
 const PAGE_SIZE = 20;
+/** Fixed row height (card + gap) for windowing, in px. */
+const LOAN_ROW_HEIGHT = 176;
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
@@ -180,12 +183,14 @@ export function LoansPageClient() {
               actionIcon={<ArrowRight className="h-4 w-4" />}
             />
           ) : (
-            <div className="space-y-3">
-              {displayedLoans.map((loan) => (
-                <article
-                  key={loan.id}
-                  className="flex flex-col gap-4 rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800 md:flex-row md:items-center md:justify-between"
-                >
+            <WindowedList
+              items={displayedLoans}
+              itemHeight={LOAN_ROW_HEIGHT}
+              label={t("title")}
+              storageKey="loans-page-list"
+              getKey={(loan) => loan.id}
+              renderItem={(loan) => (
+                <article className="flex h-[164px] flex-col gap-4 overflow-hidden rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800 md:h-[164px] md:flex-row md:items-center md:justify-between">
                   <div>
                     <p className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
                       {t("loanNumber", { id: loan.id })}
@@ -209,8 +214,8 @@ export function LoansPageClient() {
                     <ArrowRight className="h-4 w-4" />
                   </Link>
                 </article>
-              ))}
-            </div>
+              )}
+            />
           )}
 
           {displayedLoans.length > 0 && (
